@@ -1,0 +1,3053 @@
+#1.0-082818
+#!/bin/bash
+#
+#
+# PostgreSQL
+#
+# Description:  Manages a PostgreSQL database as Linux-HA resource
+#
+# Authors:     Madan Kumar K:		  PostgreSQL support
+#
+# This resource agent script is re-write for PostgreSQL and is based on percona pacemaker replication agent for MySQL 
+# available at : https://github.com/Percona-Lab/pacemaker-replication-agents/tree/master/agents
+#
+# Support:  linux-ha@lists.linux-ha.org
+# License:  GNU General Public License (GPL)
+#
+# (c) 2002-2005 International Business Machines, Inc.
+#     2005-2010 Linux-HA contributors
+# 
+# The pacemaker RA for PostgreSQL supports standalone as well as replication setup. 
+# In replication, it support both Asynchronous and Synchronous replicaiton for 2 or 3 nodes.
+# It do includes minimal pgbouncer support.
+#
+# See usage() function below for more details...
+#
+# OCF instance parameters:
+#   OCF_RESKEY_binary
+#   OCF_RESKEY_binary_prefix
+#   OCF_RESKEY_client_binary
+#   OCF_RESKEY_config
+#   OCF_RESKEY_datadir
+#   OCF_RESKEY_user
+#   OCF_RESKEY_group
+#   OCF_RESKEY_test_user
+#   OCF_RESKEY_test_passwd
+#   OCF_RESKEY_replicaConfig
+#   OCF_RESKEY_additional_parameters
+#   OCF_RESKEY_log
+#   OCF_RESKEY_pid
+#   OCF_RESKEY_socket
+#   OCF_RESKEY_replication_user
+#   OCF_RESKEY_replication_passwd
+#   OCF_RESKEY_replication_port
+#   OCF_RESKEY_replication_options
+#   OCF_RESKEY_backup_lockfile
+#   OCF_RESKEY_sg_promote_notify_endpoint
+#   OCF_RESKEY_db_type
+#   OCF_RESKEY_default_database
+#   OCF_RESKEY_master_internal_dns
+#   OCF_RESKEY_recovery_conf_file
+#   OCF_RESKEY_turn_off_sync_if_no_slaves_available
+#   OCF_RESKEY_use_replication_slots
+#	  OCF_RESKEY_sg_tmp_dir
+
+#######################################################################
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/lib/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/ocf-shellfuncs
+
+#######################################################################
+
+SG_POSTGRESQL_DB="pgsql"
+OCF_RESKEY_db_type_default=$SG_POSTGRESQL_DB
+: ${OCF_RESKEY_db_type=${OCF_RESKEY_db_type_default}}
+
+OCF_RESKEY_sg_tmp_dir_default="/var/tmp/scalegrid"
+: ${OCF_RESKEY_sg_tmp_dir=${OCF_RESKEY_sg_tmp_dir_default}}
+
+	
+if [ "$OCF_RESKEY_db_type" = "$SG_POSTGRESQL_DB" ]; then
+
+	OCF_RESKEY_binary_prefix_default="/usr/bin"
+	OCF_RESKEY_client_binary_default="${OCF_RESKEY_binary_prefix}/psql"
+	OCF_RESKEY_test_user_default="postgres"
+	OCF_RESKEY_test_passwd_default=""
+	OCF_RESKEY_replicaConfig_default="ASYNC"
+	OCF_RESKEY_additional_parameters_default=""
+	OCF_RESKEY_replication_port_default="5432"
+
+	OCF_RESKEY_binary_default="${OCF_RESKEY_binary_prefix}/postgres"
+	OCF_RESKEY_datadir_default="/var/lib/pgsql/data"
+	OCF_RESKEY_config_default="${OCF_RESKEY_datadir}/postgresql.conf"
+	OCF_RESKEY_user_default="postgres"
+	OCF_RESKEY_group_default="postgres"
+	OCF_RESKEY_log_default="/var/log/postgresql/postgresql.log"
+	OCF_RESKEY_pid_default="${OCF_RESKEY_datadir}/postmaster.pid"
+	OCF_RESKEY_socket_default="/var/run/postgresql/.s.PGSQL.${OCF_RESKEY_replication_port}"
+	OCF_RESKEY_backup_lockfile_default="${OCF_RESKEY_datadir}/backup_label"
+	OCF_RESKEY_default_database_default="postgres"
+	OCF_RESKEY_recovery_conf_file_default="${OCF_RESKEY_datadir}/recovery.conf"
+	OCF_RESKEY_turn_off_sync_if_no_slaves_available_default="false"
+	OCF_RESKEY_use_replication_slots_default="false"
+else
+	## Error out
+	exit $OCF_ERR_INSTALLED
+fi
+
+: ${OCF_RESKEY_binary_prefix=${OCF_RESKEY_binary_prefix_default}}
+: ${OCF_RESKEY_datadir=${OCF_RESKEY_datadir_default}}
+: ${OCF_RESKEY_binary=${OCF_RESKEY_binary_default}}
+: ${OCF_RESKEY_client_binary=${OCF_RESKEY_client_binary_default}}
+: ${OCF_RESKEY_config=${OCF_RESKEY_config_default}}
+: ${OCF_RESKEY_user=${OCF_RESKEY_user_default}}
+: ${OCF_RESKEY_group=${OCF_RESKEY_group_default}}
+: ${OCF_RESKEY_log=${OCF_RESKEY_log_default}}
+: ${OCF_RESKEY_pid=${OCF_RESKEY_pid_default}}
+: ${OCF_RESKEY_test_user=${OCF_RESKEY_test_user_default}}
+: ${OCF_RESKEY_test_passwd=${OCF_RESKEY_test_passwd_default}}
+: ${OCF_RESKEY_replicaConfig=${OCF_RESKEY_replicaConfig_default}}
+: ${OCF_RESKEY_additional_parameters=${OCF_RESKEY_additional_parameters_default}}
+: ${OCF_RESKEY_replication_user=${OCF_RESKEY_replication_user_default}}
+: ${OCF_RESKEY_replication_passwd=${OCF_RESKEY_replication_passwd_default}}
+: ${OCF_RESKEY_replication_port=${OCF_RESKEY_replication_port_default}}
+: ${OCF_RESKEY_replication_options=${OCF_RESKEY_replication_options_default}}
+: ${OCF_RESKEY_socket=${OCF_RESKEY_socket_default}}
+: ${OCF_RESKEY_backup_lockfile=${OCF_RESKEY_backup_lockfile_default}}
+: ${OCF_RESKEY_sg_promote_notify_endpoint}=""
+: ${OCF_RESKEY_default_database=${OCF_RESKEY_default_database_default}}
+: ${OCF_RESKEY_master_internal_dns}=""
+: ${OCF_RESKEY_recovery_conf_file=${OCF_RESKEY_recovery_conf_file_default}}
+: ${OCF_RESKEY_turn_off_sync_if_no_slaves_available=${OCF_RESKEY_turn_off_sync_if_no_slaves_available_default}}
+: ${OCF_RESKEY_use_replication_slots=${OCF_RESKEY_use_replication_slots_default}}
+
+#######################################################################
+
+# Convenience variables PostgreSQL
+POSTGRES="${OCF_RESKEY_binary_prefix}/postgres"
+PG_CTL="$TIMEOUT ${OCF_RESKEY_binary_prefix}/pg_ctl"
+PSQL="$TIMEOUT ${OCF_RESKEY_binary_prefix}/psql"
+PG_CONTROLDATA="$TIMEOUT ${OCF_RESKEY_binary_prefix}/pg_controldata"
+PG_ISREADY="$TIMEOUT ${OCF_RESKEY_binary_prefix}/pg_isready"
+
+POSTGRESQL_LAST_ERR=0
+POSTGRESQL_TOO_MANY_CONN_ERR=53300
+
+SLAVE_REPL_STAT_ATTR_NAME="slave_repl_stat"
+WAL_STATE_STREAMING="streaming"
+
+PG_RESOURCE_NODES="resource_nodes"
+PG_NO_OF_SYNC_STANDBY_NODES_CRM_ATTR_NAME="number_of_sync_standby_nodes"
+PG_DISABLE_SYNC_IF_NO_STANDBY_CRM_ATTR_NAME="disable_sync_if_standby_nodes_not_available"
+PGSQL_PGBOUNCER_CRM_ATTR_SET_NAME="pgsql_pgbouncer"
+PGSQL_PGBOUNCER_PORT_CRM_ATTR_NAME="pgbouncer_port"
+PGSQL_PGBOUNCER_SERVICE_NAME_CRM_ATTR_NAME="pgbouncer_service_name"
+
+#######################################################################
+
+# Convenience variables 
+
+CRM_MASTER="$TIMEOUT ${HA_SBIN_DIR}/crm_master -l reboot "
+HOSTNAME=`uname -n`
+CRM_ATTR="$TIMEOUT ${HA_SBIN_DIR}/crm_attribute"
+INSTANCE_ATTR_NAME=`echo ${OCF_RESOURCE_INSTANCE}| awk -F : '{print $1}'`
+
+CRM_CONFIG_ATTR="$TIMEOUT ${HA_SBIN_DIR}/crm_attribute --type crm_config -q"
+
+CRM_NODE="$TIMEOUT ${HA_SBIN_DIR}/crm_node --quiet"
+
+CRM_RES="$TIMEOUT ${HA_SBIN_DIR}/crm_resource"
+CRM_TICKET="$TIMEOUT ${HA_SBIN_DIR}/crm_ticket"
+SSH="$TIMEOUT /usr/bin/ssh "
+# Below is used as witness file for async start operation. Stop operation is sync only.
+ASYNC_START_WITNESS_FILE="${HA_RSCTMP}/start_${INSTANCE_ATTR_NAME}"
+TIMEOUT_EXIT_STATUS=124
+MONITOR_ERROR_COUNT_ATTR_NAME="monitor_error_count"
+MONITOR_FAIL_RETRY_COUNT=3
+CIB_BOOTSTRAP_OPTIONS_PROPERTY_SET="cib-bootstrap-options"
+SYMMETRIC_CLUSTER_PROPERTY="symmetric-cluster"
+CRM_ATTR_NAME_FAILOVER_PROPS="failover_props"
+REPLICATION_CRM_ATTR_SET_NAME="${OCF_RESKEY_db_type}_replication"
+REPLICATION_INFO_CRM_ATTR_NAME="${INSTANCE_ATTR_NAME}_REPL_INFO"
+REPLICATION_STATUS_CRM_ATTR_NAME="${INSTANCE_ATTR_NAME}_REPL_STATUS"
+
+SG_TMP_FOLDER_FOR_DB="${OCF_RESKEY_sg_tmp_dir}/${OCF_RESKEY_db_type}"
+
+#######################################################################
+
+# Version check functions - copied here to ensure same functions are used in AWS Linux and Cent OS
+# Adapted from https://github.com/ClusterLabs/resource-agents/blob/master/heartbeat/ocf-shellfuncs.in
+# License Info (GNU GPL v2) - https://github.com/ClusterLabs/resource-agents/blob/master/COPYING
+
+sg_is_ver() {
+        echo $1 | grep '^[0-9][0-9.-]*[0-9]$' >/dev/null 2>&1
+}
+
+sg_ver2num() {
+        echo $1 | awk -F'[.-]' '
+        {for(i=1; i<=NF; i++) s=s*1000+$i; print s}
+        '
+}
+
+sg_ver_level(){
+        echo $1 | awk -F'[.-]' '{print NF}'
+}
+
+sg_ver_complete_level(){
+        local ver="$1"
+        local level="$2"
+        local i=0
+        while [ $i -lt $level ]; do
+                ver=${ver}.0
+                i=`expr $i + 1`
+        done
+        echo $ver
+}
+
+sg_version_cmp() {
+        sg_is_ver "$1" || return 3
+        sg_is_ver "$2" || return 3
+        local v1=$1
+        local v2=$2
+        local v1_level=`sg_ver_level $v1`
+        local v2_level=`sg_ver_level $v2`
+        local level_diff
+        if [ $v1_level -lt $v2_level ]; then
+                level_diff=`expr $v2_level - $v1_level`
+                v1=`sg_ver_complete_level $v1 $level_diff`
+        elif [ $v1_level -gt $v2_level ]; then
+                level_diff=`expr $v1_level - $v2_level`
+                v2=`sg_ver_complete_level $v2 $level_diff`
+        fi
+        v1=`sg_ver2num $v1`
+        v2=`sg_ver2num $v2`
+        if [ $v1 -eq $v2 ]; then
+                return 1
+        elif [ $v1 -lt $v2 ]; then
+                return 0
+        else
+                return 2 # -1 would look funny in shell ;-)
+        fi
+}
+
+#######################################################################
+
+usage() {
+  cat <<UEND
+usage: $0 (start|stop|validate-all|meta-data|monitor|promote|demote|notify)
+
+$0 manages a PostgreSQL Database as an HA resource.
+
+The 'start' operation starts the database.
+The 'stop' operation stops the database.
+The 'status' operation reports whether the database is running
+The 'monitor' operation reports whether the database seems to be working
+The 'promote' operation makes this pgsql server run as master
+The 'demote' operation makes this pgsql server run as slave
+The 'notify' operation performs checks when promoting/demoting a master
+The 'validate-all' operation reports whether the parameters are valid
+
+UEND
+}
+
+meta_data() {
+   cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="pgsql">
+<version>1.0</version>
+
+<longdesc lang="en">
+Resource script for PostgreSQL.
+May manage a standalone PostgreSQL database, a clone set with externally
+managed replication, or a complete master/slave replication setup.
+
+While managing replication, the default behavior is to use uname -n
+values in the change master to command.  Other IPs can be specified
+manually by adding a node attribute \${INSTANCE_ATTR_NAME}_pgsql_master_IP
+giving the IP to use for replication.  For example, if the pgsql primitive
+you are using is p_pgsql, the attribute to set will be
+p_pgsql_pgsql_master_IP.
+</longdesc>
+<shortdesc lang="en">Manages a PostgreSQL database instance</shortdesc>
+<parameters>
+
+<parameter name="binary" unique="0" required="0">
+<longdesc lang="en">
+Location of the PostgreSQL server binary
+</longdesc>
+<shortdesc lang="en">PostgreSQL server binary</shortdesc>
+<content type="string" default="${OCF_RESKEY_binary_default}" />
+</parameter>
+
+<parameter name="binary_prefix" unique="0" required="0">
+<longdesc lang="en">
+A prefix to the PostgreSQL server binary. I could be for example a LD_PRELOAD or 
+a call to numactl.
+</longdesc>
+<shortdesc lang="en">PostgreSQL server binary prefix</shortdesc>
+<content type="string" default="${OCF_RESKEY_binary_prefix_default}" />
+</parameter>
+
+<parameter name="client_binary" unique="0" required="0">
+<longdesc lang="en">
+Location of the PostgreSQL client binary
+</longdesc>
+<shortdesc lang="en">PostgreSQL client binary</shortdesc>
+<content type="string" default="${OCF_RESKEY_client_binary_default}" />
+</parameter>
+
+<parameter name="config" unique="0" required="0">
+<longdesc lang="en">
+Configuration file
+</longdesc>
+<shortdesc lang="en">PostgreSQL config</shortdesc>
+<content type="string" default="${OCF_RESKEY_config_default}" />
+</parameter>
+
+<parameter name="datadir" unique="0" required="0">
+<longdesc lang="en">
+Directory containing databases
+</longdesc>
+<shortdesc lang="en">PostgreSQL datadir</shortdesc>
+<content type="string" default="${OCF_RESKEY_datadir_default}" />
+</parameter>
+
+<parameter name="user" unique="0" required="0">
+<longdesc lang="en">
+User running PostgreSQL daemon
+</longdesc>
+<shortdesc lang="en">PostgreSQL user</shortdesc>
+<content type="string" default="${OCF_RESKEY_user_default}" />
+</parameter>
+
+<parameter name="group" unique="0" required="0">
+<longdesc lang="en">
+Group running PostgreSQL daemon (for logfile and directory permissions)
+</longdesc>
+<shortdesc lang="en">PostgreSQL group</shortdesc>
+<content type="string" default="${OCF_RESKEY_group_default}"/>
+</parameter>
+
+<parameter name="log" unique="0" required="0">
+<longdesc lang="en">
+The logfile to be used for pgsql.
+</longdesc>
+<shortdesc lang="en">PostgreSQL log file</shortdesc>
+<content type="string" default="${OCF_RESKEY_log_default}"/>
+</parameter>
+
+<parameter name="pid" unique="0" required="0">
+<longdesc lang="en">
+The pidfile to be used for pgsql.
+</longdesc>
+<shortdesc lang="en">PostgreSQL pid file</shortdesc>
+<content type="string" default="${OCF_RESKEY_pid_default}"/>
+</parameter>
+
+<parameter name="socket" unique="0" required="0">
+<longdesc lang="en">
+The socket to be used for pgsql.
+</longdesc>
+<shortdesc lang="en">PostgreSQL socket</shortdesc>
+<content type="string" default="${OCF_RESKEY_socket_default}"/>
+</parameter>
+
+<parameter name="test_user" unique="0" required="0">
+<longdesc lang="en">
+PostgreSQL test user, must have select privilege on test_table
+</longdesc>
+<shortdesc lang="en">PostgreSQL test user</shortdesc>
+<content type="string" default="${OCF_RESKEY_test_user_default}" />
+</parameter>
+
+<parameter name="test_passwd" unique="0" required="0">
+<longdesc lang="en">
+PostgreSQL test user password
+</longdesc>
+<shortdesc lang="en">PostgreSQL test user password</shortdesc>
+<content type="string" default="${OCF_RESKEY_test_passwd_default}" />
+</parameter>
+
+<parameter name="replicaConfig" unique="0" required="0">
+<longdesc lang="en">
+PostgreSQL replication mode
+</longdesc>
+<shortdesc lang="en">PostgreSQL replication mode</shortdesc>
+<content type="string" default="${OCF_RESKEY_replicaConfig_default}" />
+</parameter>
+
+<parameter name="replication_user" unique="0" required="0">
+<longdesc lang="en">
+PostgreSQL replication user.
+</longdesc>
+<shortdesc lang="en">PostgreSQL replication user</shortdesc>
+<content type="string" default="${OCF_RESKEY_replication_user_default}" />
+</parameter>
+
+<parameter name="replication_passwd" unique="0" required="0">
+<longdesc lang="en">
+PostgreSQL replication password. Used for replication client and standby.
+Mandatory if you define a master-slave resource.
+</longdesc>
+<shortdesc lang="en">PostgreSQL replication user password</shortdesc>
+<content type="string" default="${OCF_RESKEY_replication_passwd_default}" />
+</parameter>
+
+<parameter name="replication_port" unique="0" required="0">
+<longdesc lang="en">
+The port on which the Master PostgreSQL instance is listening.
+</longdesc>
+<shortdesc lang="en">PostgreSQL replication port</shortdesc>
+<content type="string" default="${OCF_RESKEY_replication_port_default}" />
+</parameter>
+
+
+</parameters>
+
+<actions>
+<action name="start" timeout="120" />
+<action name="stop" timeout="120" />
+<action name="status" timeout="60" />
+<action name="monitor" depth="0" timeout="30" interval="20" />
+<action name="monitor" role="Master" depth="0" timeout="30" interval="10" />
+<action name="monitor" role="Slave" depth="0" timeout="30" interval="30" />
+<action name="promote" timeout="120" />
+<action name="demote" timeout="120" />
+<action name="notify" timeout="90" />
+<action name="validate-all" timeout="5" />
+<action name="meta-data" timeout="5" />
+</actions>
+</resource-agent>
+END
+}
+
+#######################################################################
+
+# Convenience functions for MySQL & PostgreSQL
+
+# @MySQLErrorSafe - doesn't call MySQL
+# @PostgreSQLErrorSafe - doesn't touch PostgreSQL
+set_master_score() {
+   ocf_log debug "debug: inside set_master_score"
+   ocf_log info "Setting master score to: $1" 
+   $CRM_MASTER -v $1
+}
+
+# @MySQLErrorSafe - doesn't touch MySQL
+# @PostgreSQLErrorSafe - doesn't touch PostgreSQL
+# Determines what IP address is attached to the current host.  The output of the
+# crm_attribute command looks like this:
+# scope=nodes  name=IP value=10.2.2.161
+# If the ${INSTANCE_ATTR_NAME}_${OCF_RESKEY_db_type}_MASTER_IP node attribute is not defined, fallback is to uname -n
+# The ${INSTANCE_ATTR_NAME}_${OCF_RESKEY_db_type}_MASTER_IP is the IP address that will be used for the
+# change master to command.
+get_local_ip() {
+   ocf_log debug "debug: inside get_local_ip"
+   local IP
+   IP=`$CRM_ATTR -N $HOSTNAME -l forever -n ${INSTANCE_ATTR_NAME}_${OCF_RESKEY_db_type}_master_IP -q -G`
+   if [ ! $? -eq 0 ]; then
+      uname -n
+   else
+      echo $IP
+   fi
+}
+
+#This function allows upto MONITOR_FAIL_RETRY_COUNT retries , if a failure is hit during monitor calls.
+#If retry count is already exceeded, returns an error 
+handle_error_from_monitor()
+{
+    ocf_log debug "debug: inside handle_error_from_monitor"
+    local error_count=$1
+    if [ $error_count -lt $MONITOR_FAIL_RETRY_COUNT ]; then
+        set_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME "$((${error_count}+1))"
+        ocf_log debug "handle_error_from_monitor: ${OCF_RESKEY_db_type} monitor: returning success";
+        if [ "$OCF_RESKEY_CRM_meta_role" = "Slave" ]; then
+            return $OCF_SUCCESS
+        else
+            return $OCF_RUNNING_MASTER
+        fi
+    else
+        set_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME '0'
+        return $OCF_ERR_GENERIC;
+    fi
+}
+
+# Adds internal master dns entry to /etc/hosts
+add_or_update_master_dns_entry() {
+
+	ocf_log debug "debug: inside add_or_update_master_dns_entry"
+
+	local master_host
+	local master_internal_dns_alias
+	local master_internal_dns="$OCF_RESKEY_master_internal_dns"
+	local dns_entry_line
+	local repl_info
+	
+	if [ -z "$master_internal_dns" ]; then
+		ocf_log err "add_or_update_master_dns_entry: master internal dns is empty"
+		return $OCF_ERR_GENERIC
+	fi
+	
+	master_internal_dns_alias=`echo "$master_internal_dns" | cut -d '.' -f1`
+	
+	if [ "$glb_master_exists" -eq "1" ]; then
+		ocf_log info "add_or_update_master_dns_entry: Master exist. Getting master host from cib"
+		repl_info=`get_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$REPLICATION_INFO_CRM_ATTR_NAME"`
+		master_host=`echo $repl_info | cut -d'|' -f1`
+	else 
+		ocf_log info "add_or_update_master_dns_entry: Master doesn't exist. Remove the dns entry"
+		#Delete existing entry if exists
+		sed -i "/${master_internal_dns}/d" /etc/hosts
+		return $OCF_SUCCESS;
+	fi
+
+	if [ -z "$master_host" ]; then
+		ocf_log err "add_or_update_master_dns_entry: master host is empty"
+		return $OCF_ERR_GENERIC
+	fi
+
+	ocf_log info "add_or_update_master_dns_entry: master_host = $master_host"
+	
+	#Delete existing entry if exists
+	sed -i "/${master_internal_dns}/d" /etc/hosts
+	
+	#Add new entry
+	dns_entry_line="$master_host	$master_internal_dns	$master_internal_dns_alias"
+	sed -i "\$ a $dns_entry_line" /etc/hosts
+	
+}
+
+
+# Removes internal master dns entry in /etc/hosts
+remove_master_dns_entry() {
+
+	ocf_log debug "debug: inside remove_master_dns_entry"
+
+	local master_internal_dns="$OCF_RESKEY_master_internal_dns"
+	
+	if [ -z "$master_internal_dns" ]; then
+		ocf_log err "remove_master_dns_entry: master internal dns is empty"
+		return $OCF_ERR_GENERIC
+	fi
+
+	ocf_log err "remove_master_dns_entry: removing master internal dns entry"
+	sed -i "/${master_internal_dns}/d" /etc/hosts
+	return $OCF_SUCCESS;
+}
+
+# Get CRM attribute whose lifetime is reboot
+# get_crm_node_attr_val "host" "key" ["defaultVal"]
+get_crm_node_attr_val() {
+
+	ocf_log debug "inside get_crm_node_attr_val"
+
+	local node=$1
+	local key=$2
+	local defaultVal=$3
+	local crm_node_attr_get_cmd
+	local out
+
+	ocf_log debug "get_crm_node_attr_val: node=$node key=$key defaultVal=$defaultVal"
+	
+	crm_node_attr_get_cmd="$CRM_ATTR -N $node -l reboot --name $key --query -q"
+	
+	if [ -n "$defaultVal" ]; then
+		crm_node_attr_get_cmd="${crm_node_attr_get_cmd} --default=${defaultVal}"
+	fi
+	
+	out=`$crm_node_attr_get_cmd`
+	ocf_log debug "get_crm_node_attr_val: value=$out"
+	
+	echo $out
+}
+
+# Set CRM attribute whose lifetime is reboot
+# set_crm_node_attr_val [-b] "host" "key" "value"
+set_crm_node_attr_val() {
+
+	ocf_log debug "inside set_crm_node_attr_val"
+	
+	local node
+	local key
+	local value
+	local background
+	local crm_node_attr_set_cmd
+
+	for var in 1 2 3 4
+	do
+	  case "$1" in
+		 "-b")
+			background=1
+		 shift 1;;
+		 
+		 *)
+		 ;;
+	  esac
+	done
+
+	node=$1
+	key=$2
+	value=$3
+	
+	ocf_log debug "set_crm_node_attr_val: node=$node key=$key value=$value"
+	
+	crm_node_attr_set_cmd="$CRM_ATTR -N $node -l reboot --name $key -v $value"
+	
+	if [ -n "$background" ]; then
+		$crm_node_attr_set_cmd &
+	else
+		$crm_node_attr_set_cmd
+	fi
+}
+
+# Get CRM config attribute value
+# get_crm_config_attr_val "attr_set_name" "attr_name" ["defaultVal"]
+get_crm_config_attr_val() {
+
+	ocf_log debug "inside get_crm_config_attr_val"
+
+	local attr_set_name=$1
+	local attr_name=$2
+	local defaultVal=$3
+	local crm_config_attr_get_cmd
+	local out
+	local rc
+
+	ocf_log debug "get_crm_config_attr_val: attribute_name=$attr_name attribute_set_name=$attr_set_name defaultVal=$defaultVal"
+	
+	crm_config_attr_get_cmd="$CRM_CONFIG_ATTR -s $attr_set_name --name $attr_name --query"
+
+	if [ -n "$defaultVal" ]; then
+		crm_config_attr_get_cmd="${crm_config_attr_get_cmd} --default=${defaultVal}"
+	fi
+	
+	out=`$crm_config_attr_get_cmd`
+	rc=$?
+	ocf_log debug "get_crm_config_attr_val: value=$out"
+	
+	echo $out
+	return $rc
+}
+
+# Set CRM attribute whose lifetime is reboot
+# set_crm_config_attr_val [-b] "attr_set_name" "attr_name" "attr_value"
+set_crm_config_attr_val() {
+
+	ocf_log debug "inside set_crm_config_attr_val"
+	
+	local attr_set_name
+	local attr_name
+	local attr_value
+	local background
+	local crm_config_attr_set_cmd
+	local rc
+	
+	for var in 1 2 3 4
+	do
+	  case "$1" in
+		 "-b")
+			background=1
+		 shift 1;;
+		 
+		 *)
+		 ;;
+	  esac
+	done
+
+	attr_set_name=$1
+	attr_name=$2
+	attr_value=$3
+	
+	ocf_log debug "set_crm_config_attr_val: attribute_name=$attr_name attribute_set_name=$attr_set_name attribute_value=$attr_value"
+	
+	crm_config_attr_set_cmd="$CRM_CONFIG_ATTR -s $attr_set_name --name $attr_name -v $attr_value"
+	
+	if [ -n "$background" ]; then
+		$crm_config_attr_set_cmd &
+	else
+		$crm_config_attr_set_cmd
+	fi
+
+	rc=$?
+	return $rc
+}
+
+is_symmetric_cluster() {
+
+	ocf_log debug "inside is_symmetric_cluster"
+	local is_symmetric_cluster
+	local rc
+	
+	is_symmetric_cluster=`get_crm_config_attr_val "${CIB_BOOTSTRAP_OPTIONS_PROPERTY_SET}" "${SYMMETRIC_CLUSTER_PROPERTY}"`
+	if ocf_is_true $is_symmetric_cluster; then
+		return $OCF_SUCCESS
+	else
+		return $OCF_ERR_GENERIC
+	fi
+}
+
+# Get All resource nodes configured under pacemaker
+# This will ensure only nodes which can run resources are returned.
+get_crm_resource_nodes() {
+	ocf_log debug "inside get_crm_resource_nodes"
+
+	crm_resource_nodes_out=`get_crm_config_attr_values_with_retries "$REPLICATION_CRM_ATTR_SET_NAME" "$PG_RESOURCE_NODES"`
+	rc=$?
+	crm_resource_nodes_out=`echo "$crm_resource_nodes_out" | xargs`
+	echo "$crm_resource_nodes_out"
+	return $rc
+}
+
+# Checks if the process with pid exists
+is_process_with_pid_exists() {
+	
+	ocf_log debug "inside is_process_with_pid_exists"
+	local pid=$1
+	local rc
+
+	if [ -d /proc -a -d /proc/1 ]; then
+		[ "u$pid" != "u" -a -d /proc/$pid ]
+	else
+		kill -s 0 $pid >/dev/null 2>&1
+	fi
+
+	rc=$?
+	
+	if [ $rc -eq 0 ]; then
+		return $OCF_SUCCESS
+	else 
+		return $OCF_ERR_GENERIC
+	fi
+
+}
+
+get_crm_config_attr_values_with_retries() {
+	local attr_set_name=$1
+	local attr_name=$2
+	local default_val=$3
+	
+	local attr_value
+	local Iter=5
+	while [ "$Iter" -gt 0 ]; do
+		if [ -z "$default_val" ]; then
+			attr_value=`get_crm_config_attr_val "$attr_set_name" "$attr_name"`
+		else
+			attr_value=`get_crm_config_attr_val "$attr_set_name" "$attr_name" "$default_val"`
+		fi
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		break;
+	else
+		sleep 1
+		let Iter-=1
+	fi
+	done
+	echo "$attr_value"
+	return $rc	
+}
+
+get_repl_status_attribute_from_cib() {
+    # Get the last repl. status from the cib, it may happen after a crash and
+    # pacemaker may take longer to reply so we loop
+	local repl_status_attr
+	repl_status_attr=`get_crm_config_attr_values_with_retries "$REPLICATION_CRM_ATTR_SET_NAME" "$REPLICATION_STATUS_CRM_ATTR_NAME"`
+	rc=$?
+	echo "$repl_status_attr"
+	return $rc
+}
+
+# Notify SG regarding the promotion
+sg_notify_promote_event() {
+	
+	ocf_log debug "inside sg_notify_promote_event"
+	local rc
+	
+	if [ -n "$OCF_RESKEY_sg_promote_notify_endpoint" ]; then
+
+		ocf_log debug "sg_notify_promote_event: Invoking sg promote notify endpoint ${OCF_RESKEY_sg_promote_notify_endpoint}"
+		
+		curl ${OCF_RESKEY_sg_promote_notify_endpoint}
+		rc=$?
+
+		if [ $rc -eq 0 ]; then
+			return $OCF_SUCCESS
+		else 
+			return $OCF_ERR_GENERIC
+		fi
+	else 
+		ocf_log err "sg_notify_promote_event: sg promote notify endpoint not specified"
+		return $OCF_ERR_GENERIC	
+	fi
+}
+
+
+#######################################################################
+
+# Convenience functions for PostgreSQL
+
+# run_as_resource_owner: Run the given command in the Resource owner environment.
+# Usage:   run_as_resource_owner [-Q] [-info|-warn|-err] [-O] <command>
+#       -Q: don't log the output of the command if it succeeds
+#       -info|-warn|-err: log the output of the command at given
+#               severity if it fails (defaults to err)
+#       -O: echo the output of the command
+# Adapted from ocf_run.
+#
+run_as_resource_owner() {
+
+   ocf_log debug "inside run_as_resource_owner"
+   local rc
+   local output outputfile
+   local verbose=1
+   local returnoutput
+   local loglevel=err
+   local var
+   
+   for var in 1 2 3
+   do
+      case "$1" in
+         "-Q")
+            verbose=""
+         shift 1;;
+         "-info"|"-warn"|"-err")
+            loglevel=`echo $1 | sed -e s/-//g`
+         shift 1;;
+         "-O")
+            returnoutput=1
+         shift 1;;
+         
+         *)
+         ;;
+      esac
+   done
+   
+   outputfile=`mktemp ${HA_RSCTMP}/run_as_resource_owner.${OCF_RESOURCE_INSTANCE}.XXXXXX`
+   error=`/bin/su - $OCF_RESKEY_user -c "$@" 2>&1 1>$outputfile`
+   rc=$?
+
+   output=`cat $outputfile`
+   rm -f $outputfile
+   
+   if [ $rc -eq 0 ]; then
+      if [ "$verbose" -a ! -z "$output" ]; then
+         ocf_log info "run_as_resource_owner: Output = $output"
+      fi
+      
+      if [ "$returnoutput" -a ! -z "$output" ]; then
+         echo "$output"
+      fi
+      
+      return $OCF_SUCCESS
+   else
+      if [ ! -z "$error" ]; then
+         ocf_log $loglevel "run_as_resource_owner: Error = $error"
+      else
+         ocf_log $loglevel "run_as_resource_owner: command failed: $*"
+      fi
+      # No output to parse so return the standard exit code.
+      return $rc
+   fi
+}
+
+# Returns the port to connect to PostgreSQL
+# If pgbouncer is configured then it will use that port else default to repl port.
+get_pgsql_port_to_connect() {
+
+	ocf_log debug "inside get_pgsql_port_to_connect"
+	
+	if [ -z "$pgport" ]; then
+		pgport="$OCF_RESKEY_replication_port"
+
+		local pgbouncer_port=`get_pg_bouncer_port`
+		if [ ! -z "$pgbouncer_port" ]; then
+			pgport="$pgbouncer_port"
+		fi
+	fi	
+
+	echo "$pgport"
+}
+
+get_pg_bouncer_port() {
+	ocf_log debug "inside get_pg_bouncer_port"
+
+	local pgbouncer_port=`get_crm_config_attr_values_with_retries "$PGSQL_PGBOUNCER_CRM_ATTR_SET_NAME" "$PGSQL_PGBOUNCER_PORT_CRM_ATTR_NAME" ""`
+
+	echo "$pgbouncer_port"
+}
+
+get_pg_bouncer_service_name() {
+	ocf_log debug "inside get_pg_bouncer_service_name"
+
+	local pgbouncer_service_name=`get_crm_config_attr_values_with_retries "$PGSQL_PGBOUNCER_CRM_ATTR_SET_NAME" "$PGSQL_PGBOUNCER_SERVICE_NAME_CRM_ATTR_NAME" ""`
+
+	echo "$pgbouncer_service_name"
+}
+
+# Best effort to stop pgbouncer
+stop_pg_bouncer() {
+
+	ocf_log debug "inside stop_pg_bouncer"
+	
+	local pgbouncer_port=`get_pg_bouncer_port`
+	if [ -n "$pgbouncer_port" ]; then
+		local pgbouncer_service_name=`get_pg_bouncer_service_name`
+		if [ -n "$pgbouncer_service_name" ]; then
+			service $pgbouncer_service_name stop
+		fi
+	fi
+
+}
+
+# Best effort to start pgbouncer
+start_pg_bouncer() {
+
+	ocf_log debug "inside start_pg_bouncer"
+	
+	local pgbouncer_port=`get_pg_bouncer_port`
+	if [ -n "$pgbouncer_port" ]; then
+		local pgbouncer_service_name=`get_pg_bouncer_service_name`
+		if [ -n "$pgbouncer_service_name" ]; then
+			service $pgbouncer_service_name start
+		fi
+	fi
+
+}
+
+# Creates PostgreSQL recovery configuration file
+create_recovery_conf() {
+
+	ocf_log debug "inside create_recovery_conf"
+	local rc
+	
+	if [ -z "$OCF_RESKEY_recovery_conf_file" ]; then
+		ocf_log err "create_recovery_conf: recovery file not specified"
+		return $OCF_ERR_GENERIC
+	fi
+	
+	run_as_resource_owner -Q -err -O "touch $OCF_RESKEY_recovery_conf_file"
+	rc=$?
+	
+	if [ $rc -ne 0 ]; then
+		ocf_exit_reason "create_recovery_conf: Unable to create recovery conf file $OCF_RESKEY_recovery_conf_file"
+		return $OCF_ERR_GENERIC
+	fi
+
+cat > $OCF_RESKEY_recovery_conf_file <<EOF
+standby_mode = 'on'
+primary_conninfo = 'host=${OCF_RESKEY_master_internal_dns} port=${OCF_RESKEY_replication_port} user=${OCF_RESKEY_replication_user} password=${OCF_RESKEY_replication_passwd} application_name=${HOSTNAME}'
+recovery_target_timeline = 'latest'
+EOF
+
+	if ocf_is_true $OCF_RESKEY_use_replication_slots; then
+		local primary_slot_name=`convert_replication_slot_name_to_adhere_conventions "${HOSTNAME}"`
+		local primary_slot="primary_slot_name = '${primary_slot_name}'"
+		echo $primary_slot >> $OCF_RESKEY_recovery_conf_file
+	fi
+	
+	# Recovery conf should be readable by PostgreSQL User/Group only
+	chmod 0600 $OCF_RESKEY_recovery_conf_file
+	chown $OCF_RESKEY_user $OCF_RESKEY_recovery_conf_file
+	chgrp $OCF_RESKEY_group $OCF_RESKEY_recovery_conf_file
+}
+
+# psql_run: Run the given PostgreSQL query.
+# Usage:   psql_run [-Q] [-info|-warn|-err] [-O] [-test|-repl] [-usePgPort] [-x] <query>
+#       -Q: don't log the output of the psql if it succeeds
+#       -info|-warn|-err: log the output of the command at given
+#               severity if it fails (defaults to err)
+#       -O: echo the output of the command
+#  		-test|-repl: Which credentials needs to be used to connect to psql
+#		-x: Enable extended output of records (print in key value pair)
+#		-usePgPort: Use PostgreSQL port itself and not any connection pooler
+# Adapted from ocf_run.
+#
+psql_run() {
+
+   ocf_log debug "inside psql_run"
+   local rc
+   local output outputfile
+   local verbose=1
+   local returnoutput
+   local loglevel=err
+   local var
+   local inputfile
+   local query
+   local cred_type
+   local psql_options=""
+   local psql_cmd
+   local extendedOut
+   local usePgPort
+   
+   for var in 1 2 3 4 5
+   do
+      case "$1" in
+         "-Q")
+            verbose=""
+         shift 1;;
+         "-info"|"-warn"|"-err")
+            loglevel=`echo $1 | sed -e s/-//g`
+         shift 1;;
+         "-O")
+            returnoutput=1
+         shift 1;;
+         "-test"|"-repl")
+            cred_type=`echo $1 | sed -e s/-//g`
+         shift 1;;
+         "-x")
+            extendedOut=1
+         shift 1;;
+         "-usePgPort")
+            usePgPort=1
+         shift 1;;
+         
+         *)
+         ;;
+      esac
+   done
+
+   query="$@"
+   inputfile=`mktemp ${HA_RSCTMP}/psql_run_input.${OCF_RESOURCE_INSTANCE}.XXXXXX`
+   echo "$query" > $inputfile
+   ocf_log debug "psql_run: query = $query"
+   chown $OCF_RESKEY_user $inputfile
+   
+   outputfile=`mktemp ${HA_RSCTMP}/psql_run_output.${OCF_RESOURCE_INSTANCE}.XXXXXX`
+
+   if [ -z "$cred_type" -o  "$cred_type" = "test" ]; then
+	PGUSER="$OCF_RESKEY_test_user"; export PGUSER
+	PGPASSWORD="$OCF_RESKEY_test_passwd"; export PGPASSWORD
+   elif [ "$cred_type" = "repl" ]; then
+	PGUSER="$OCF_RESKEY_replication_user"; export PGUSER
+	PGPASSWORD="$OCF_RESKEY_replication_passwd"; export PGPASSWORD
+   fi
+   
+   if [ -n "$extendedOut" ]; then 
+	psql_options='-x'
+   fi
+
+   local pgport=$OCF_RESKEY_replication_port
+   if [ -z "$usePgPort" ]; then
+	pgport=`get_pgsql_port_to_connect`
+   fi
+
+   local pghost="127.0.0.1"
+   
+   psql_options="$psql_options --set ON_ERROR_STOP=1 --set VERBOSITY='verbose'"
+   psql_cmd="$PSQL $psql_options -qXAtf $inputfile --port $pgport --host $pghost -d $OCF_RESKEY_default_database"
+   error=`/bin/su $OCF_RESKEY_user -c "cd $OCF_RESKEY_datadir; $psql_cmd" 2>&1 1>$outputfile`
+   rc=$?
+
+   output=`cat $outputfile`
+   rm -f $outputfile
+   rm -f $inputfile
+   
+   if [ $rc -eq 0 ]; then
+      if [ "$verbose" -a ! -z "$output" ]; then
+         ocf_log info "psql_run: Output = $output"
+      fi
+      
+      if [ "$returnoutput" -a ! -z "$output" ]; then
+         echo "$output"
+      fi
+      
+      POSTGRESQL_LAST_ERR=$OCF_SUCCESS
+      return $OCF_SUCCESS
+   else
+      if [ ! -z "$error" ]; then
+         ocf_log $loglevel "psql_run: Error = $error"
+		 # PostgreSQL error code contains 5 digits
+		 # https://www.postgresql.org/docs/9.6/errcodes-appendix.html
+         regex='^ERROR:  ([[:digit:]]{5}).*'
+         if [[ $error =~ $regex ]]; then
+            pgsql_code=${BASH_REMATCH[1]}
+            if [ -n "$pgsql_code" ]; then
+               POSTGRESQL_LAST_ERR=$pgsql_code
+               return $rc
+            fi
+         fi
+      else
+         ocf_log $loglevel "psql_run: command failed: $*"
+      fi
+      # No output to parse so return the standard exit code.
+      POSTGRESQL_LAST_ERR=$rc
+      return $rc
+   fi
+}
+
+
+is_sync_standby() {
+
+	ocf_log debug "inside is_sync_standby"
+	
+	local standby_repl_stat=`get_crm_node_attr_val $HOSTNAME $SLAVE_REPL_STAT_ATTR_NAME 'none'`
+
+	if [ -n "$standby_repl_stat" -a "$standby_repl_stat" != "none" ]; then
+		ocf_log debug "is_sync_standby: Standby repl stat = $standby_repl_stat"
+		local sync_state=`echo $standby_repl_stat | cut -d "|" -f5`
+		ocf_log debug "is_sync_standby: sync state = $sync_state"
+		if [ -n "$sync_state" -a "$sync_state" = "sync" ]; then
+			return $OCF_SUCCESS
+		fi
+	fi
+
+	return $OCF_ERR_GENERIC
+}
+
+# get_pgsql_role: Get the role of PostgreSQL.
+# Retrun code will convey the PostgreSQL role
+# Master -> $OCF_RUNNING_MASTER
+# Standby -> $OCF_SUCCESS
+# Any error -> $OCF_ERR_GENERIC
+get_pgsql_role() {
+
+   local pg_in_recovery_output
+   
+   ocf_log debug "inside get_pgsql_role"
+
+   pg_in_recovery_output=`psql_run -Q -err -O -test "$PGSQL_IS_IN_RECOVERY_QUERY"`
+   rc=$?
+   
+   if [ $rc -eq 0 ]; then
+		case "$pg_in_recovery_output" in
+            f)  ocf_log debug "get_pgsql_role: PostgreSQL is running as a master."
+				return $OCF_RUNNING_MASTER;;
+
+            t)  ocf_log debug "get_pgsql_role: PostgreSQL is running as a hot standby."
+                return $OCF_SUCCESS;;
+
+            *)  ocf_exit_reason "get_pgsql_role: $PGSQL_IS_IN_RECOVERY_QUERY output is $pg_in_recovery_output"
+                return $OCF_ERR_GENERIC;;
+        esac
+   else
+		ocf_log err "get_pgsql_role: Can't get PostgreSQL recovery status."
+		return $OCF_ERR_GENERIC
+   fi
+   
+}
+
+# Checks if PostgreSQL is ready to accept connections.
+# Return code and meaning
+# 0		PQPING_OK,					/* server is accepting connections */
+# 1		PQPING_REJECT,				/* server is alive but rejecting connections */
+# 2		PQPING_NO_RESPONSE,			/* could not establish connection */
+# 3		PQPING_NO_ATTEMPT			/* connection not attempted (bad params) */
+pg_is_ready() {
+	ocf_log debug "inside pg_is_ready"
+	local rc
+	local pg_isready_cmd
+
+	pg_isready_cmd="$PG_ISREADY -d $OCF_RESKEY_default_database -p $OCF_RESKEY_replication_port -U $OCF_RESKEY_test_user"
+	run_as_resource_owner -Q -err "$pg_isready_cmd"
+
+	rc=$?
+	return $rc
+}
+
+# Caller is responsible for removing the output file
+get_pgsql_controldata() {
+	ocf_log debug "inside get_pgsql_controldata"
+
+	pg_controldata_output_file="${HA_RSCTMP}/pgsql_controldata.${OCF_RESOURCE_INSTANCE}"
+
+	run_as_resource_owner -Q -err -O "$PG_CONTROLDATA -D $OCF_RESKEY_datadir" > $pg_controldata_output_file
+
+}
+
+# @PostgreSQLErrorSafe - doesn't touch PostgreSQL
+parse_controldata_pgsql() {
+   # Extracts field $1 from result of "pg_controldata" from file $2
+   ocf_log debug "inside parse_controldata_pgsql"
+   sed -ne "s/^$1:[[:space:]]*\(.*\)[[:space:]]*$/\1/p" < $2
+}
+
+get_pgsql_timeline() {
+	ocf_log debug "inside get_pgsql_timeline"
+
+	local timeline
+	
+	get_pgsql_controldata
+	
+	if [ -s $pg_controldata_output_file ]; then
+		timeline=`parse_controldata_pgsql "Latest checkpoint's TimeLineID" "$pg_controldata_output_file"`
+	else
+		ocf_log err "get_pgsql_timeline: pg_controldata output is empty"
+	fi
+
+	rm -f $pg_controldata_output_file
+
+	echo $timeline
+}
+
+get_pgsql_status_from_controldata() {
+	ocf_log debug "inside get_pgsql_status_from_controldata"
+
+	local cluster_status
+	
+	get_pgsql_controldata
+	
+	if [ -s $pg_controldata_output_file ]; then
+		cluster_status=`parse_controldata_pgsql "Database cluster state" "$pg_controldata_output_file"`
+	else
+		ocf_log err "get_pgsql_status_from_controldata: pg_controldata output is empty"
+	fi
+
+	rm -f $pg_controldata_output_file
+
+	echo $cluster_status
+}
+
+# @PostgreSQLErrorUnSafe - callers should check the return value from this method
+# Stores master lsn from PostgreSQL
+update_data_master_status_pgsql() {
+	ocf_log debug "inside update_data_master_status_pgsql"
+	local master_lsn
+	local master_timeline
+
+	master_status_file="${HA_RSCTMP}/master_status.${OCF_RESOURCE_INSTANCE}"
+
+	master_lsn=`psql_run -Q -err -O -test "$PGSQL_GET_MASTER_CURRENT_LSN_QUERY"`
+	master_timeline=`get_pgsql_timeline`
+
+	if [ -n "$master_lsn" -a -n "$master_timeline" ]; then
+		echo "$master_lsn|$master_timeline" > $master_status_file   
+	fi
+}
+
+# @PostgreSQLErrorSafe - doesn't touch PostgreSQL
+# Returns the master lsn from master status file.
+# should be call after update_data_master_status_pgsql for master_status_file
+get_master_status_pgsql() {
+   ocf_log debug "inside get_master_status_pgsql"
+   local master_lsn
+   local master_timeline
+   
+   master_lsn=`cat $master_status_file | cut -d "|" -f 1`
+   master_timeline=`cat $master_status_file | cut -d "|" -f 2`
+   
+   echo "$master_lsn|$master_timeline"
+}
+
+# @PostgreSQLErrorUnSafe
+# Should be called on master node only
+update_slave_replication_stats_pgsql() {
+
+	ocf_log debug "inside update_slave_replication_stats_pgsql"
+
+	local output
+	local application_name
+
+	slave_repl_stats_file="${HA_RSCTMP}/slave_repl_stats.${OCF_RESOURCE_INSTANCE}"
+	
+	output=`psql_run -Q -err -O -test "$PGSQL_GET_REPLICATION_STATS_QUERY"`
+	
+	if [ -n "$output" ]; then
+		echo "$output" > $slave_repl_stats_file
+		return $OCF_SUCCESS
+	else
+		ocf_log err "update_slave_replication_stats_pgsql: No replication stats"
+		return $OCF_ERR_GENERIC
+	fi
+}	
+
+# @PostgreSQLErrorSafe - doesn't touch PostgreSQL
+# Returns the master lsn from master status file.
+# should be call after update_data_master_status_pgsql for master_status_file
+get_slave_replication_stats_pgsql() {
+   ocf_log debug "inside get_slave_replication_stats_pgsql"
+   local slave_repl_stats
+   
+   slave_repl_stats=`cat $slave_repl_stats_file`
+   
+   echo "$slave_repl_stats"
+}
+
+# Issues reload(SIGHUP) to PostgreSQL.
+reload_pgsql() {
+   ocf_log debug "inside reload_pgsql"
+   
+   run_as_resource_owner -Q -err "$PG_CTL -D $OCF_RESKEY_datadir reload"
+}
+
+# @PostgreSQLErrorUnSafe - callers should check return value
+set_read_only_pgsql() {
+   # Sets or unsets read-only mode. Accepts one boolean as its
+   # argument. Should only be set in master/slave setups.
+
+   ocf_log debug "inside set_read_only_pgsql"
+   local ro_val
+   
+   if ocf_is_true $1; then
+      #setting default_transaction_read_only to on will ensure read-only
+      ocf_log info "set_read_only_pgsql: Turning on read only transactions"
+	  ro_val="on"
+   else
+      #setting default_transaction_read_only to off will ensure read/write
+      ocf_log info "set_read_only_pgsql: Turning off read only transactions"
+      ro_val="off"
+   fi    
+   
+   # Delete the line
+   sed -i "/default_transaction_read_only/d" $OCF_RESKEY_config
+   
+   # Add the parameter
+   sed -i "\$ a default_transaction_read_only=\'$ro_val\'" $OCF_RESKEY_config
+
+   reload_pgsql
+}
+
+# @PostgreSQLErrorUnSafe - connects to PostgreSQL.
+# However error checks on this function can be ignored
+get_read_only_pgsql() {
+	# Check if read-only is set
+	ocf_log debug "inside get_read_only_pgsql"
+	local read_only_state
+
+	read_only_state=`psql_run -Q -err -O -test "SHOW default_transaction_read_only"`
+
+	if [ -n "$read_only_state" ]; then
+		if [ "$read_only_state" = "on" ]; then
+		  ocf_log info "get_read_only_pgsql: read only is set to on"
+		  return 0
+		elif [ "$read_only_state" = "off" ]; then
+		  ocf_log info "get_read_only_pgsql: read only is set to off"
+		  return 1
+		fi
+	else
+		POSTGRESQL_LAST_ERR=$PRM_READ_ONLY_CHECK_OP_ERR
+		return $POSTGRESQL_LAST_ERR
+	fi
+}
+
+# @PostgreSQLErrorUnSafe
+# returns OCF_SUCCESS if slave
+is_slave_pgsql() {
+
+	# Determine whether the machine is currently running as a PostgreSQL slave
+	ocf_log debug "inside is_slave_pgsql"
+	local rc
+
+	# Check whether this machine should be slave
+	if ! ocf_is_ms ; then
+	  ocf_log info "is_slave_pgsql: Not a Master slave config"
+	  return $OCF_ERR_GENERIC
+	fi
+
+	get_pgsql_role
+	rc=$?
+   
+	if [ $rc -eq $OCF_SUCCESS ]; then
+	    ocf_log debug "is_slave_pgsql: Node is a slave"
+		return $OCF_SUCCESS
+	else
+	    ocf_log debug "is_slave_pgsql: Node is not a slave"
+		return $OCF_ERR_GENERIC
+	fi
+   
+}
+
+# @PostgreSQLErrorUnSafe/ - However that doesn't matter:
+# There is ONLY ONE instance of a call to this method, from pgsql_monitor().
+# This method ONLY returns when the monitor checks can continue, else it exits
+# It accepts monitor_error_count as parameter and will tolerate those many failures
+check_slave_pgsql() {
+	# Checks slave status
+	ocf_log debug "inside check_slave_pgsql"
+	local rc new_master
+	local slave_stat
+	local slave_timeline
+    local monitor_error_count=$1
+
+	get_slave_info_pgsql
+	rc=$?
+
+	if [ $rc -eq 0 ]; then
+
+		if [ "$slave_wal_receiver_status" != "$WAL_STATE_STREAMING" ]; then
+			## Check if this slave is diverged from master timeline
+			local master_status_attr=`get_repl_status_attribute_from_cib`
+			rc=$?
+	   
+			if [ $rc -eq 0 ]; then
+				# There's a master status entry although we don't know if it is
+				# a valid one
+				master_timeline=`echo $master_status_attr | cut -d "|" -f2`
+				slave_timeline=`get_pgsql_timeline`
+				
+				if [ -n "$master_timeline" -a -n "$slave_timeline" ]; then
+					if [ $slave_timeline -ne $master_timeline ]; then 
+						ocf_log err "check_slave_pgsql: Master and Standby timeline doesn't match. Return error"
+						set_master_score -2147483640
+						handle_error_from_monitor $monitor_error_count
+						rc=$?
+						if [ $rc -eq $OCF_ERR_GENERIC ]; then 
+							exit $OCF_ERR_ARGS
+						fi
+						exit $rc
+					fi
+				fi
+			fi
+
+		fi
+		
+		# Check for wal receiver status
+		if [ -z "$slave_wal_receiver_status" ]; then
+			ocf_log err "check_slave_pgsql: PostgreSQL instance configured for replication, but wal streaming is stopped."
+			#Since replication is broken, not suitable to be a master
+			set_master_score -2147483640
+			
+			restart_wal_receiver_process
+			handle_error_from_monitor $monitor_error_count
+			rc=$?
+			if [ $rc -eq $OCF_ERR_GENERIC ]; then 
+				exit $OCF_ERR_ARGS
+			fi
+			exit $rc
+		fi
+		
+		# Check if it's syncing from the current master
+		# How we do this is, we upload the slave stats during master monitor.
+		# If an entry is present for that slave, then it's syncing from that master
+		slave_stat=`get_crm_node_attr_val $HOSTNAME $SLAVE_REPL_STAT_ATTR_NAME 'none'`
+
+		if [ -n "$slave_stat" -a "$slave_stat" != "none" ]; then
+			# slave is streaming with current master
+			# NO op
+			ocf_log debug "check_slave_pgsql: PostgreSQL Slave is replicating from current master."
+		else 
+
+			ocf_log err "check_slave_pgsql: PostgreSQL Slave not replicating from current master."
+
+			set_master_score -2147483640
+
+			add_or_update_master_dns_entry
+
+			# Slave is not syncing from the current master
+			# let's try restarting the wal receiver
+			restart_wal_receiver_process
+
+			handle_error_from_monitor $monitor_error_count
+			if [ $rc -eq $OCF_ERR_GENERIC ]; then 
+				exit $OCF_ERR_ARGS
+			fi
+			rc=$?
+			exit $rc
+		fi
+
+
+		if [ "$slave_is_wal_replay_paused" = "t" ]; then 
+			ocf_log err "check_slave_pgsql: PostgreSQL Slave has paused replaying wal logs."
+
+			set_master_score -2147483640
+
+			psql_run -Q -err -O -test "$PGSQL_RESUME_WAL_REPLAY_QUERY"
+
+			exit $OCF_SUCCESS
+		fi
+
+		if ocf_is_ms; then
+			# Even if we're not set to evict lagging slaves, we can
+			# still use the seconds behind master value to set our
+			# master preference.
+			local master_pref
+			test $secs_behind -eq 0 2>/dev/null
+			if [ $? -eq 2 ]; then
+				# SBM is undefined or not an integer
+				# master_pref=0
+				# unless SBM is defined, we will not allow it to be master
+				master_pref=-2147483640
+			else
+
+				# even if SBM is defined let us not make any decision based on SBM and let actual score calculation manage it
+				master_pref=-2147483640
+
+			fi
+
+			set_master_score $master_pref
+		fi
+	  
+		ocf_log debug "check_slave_pgsql: PostgreSQL instance running as a replication slave"
+		set_crm_node_attr_val "$HOSTNAME" "$WAL_RECEIVER_RESTART_COUNT_ATTR_NAME" '0'
+
+	else
+	
+		# Instance produced an empty "slave stats" output --
+		# instance is not a slave
+		# TODO: Needs to handle when get_slave_info_pgsql will return too many connections error
+		if [ $POSTGRESQL_LAST_ERR -eq "$POSTGRESQL_TOO_MANY_CONN_ERR" ]; then
+			return $OCF_SUCCESS
+		fi
+
+		ocf_log err "check_slave_pgsql: check_slave invoked on an instance that is not a replication slave."
+		exit $OCF_ERR_GENERIC
+	fi
+}
+
+# @PostgreSQLErrorSafe - doesn't touch PostgreSQL
+parse_slave_info_pgsql() {
+   # Extracts field $1 from result of "PG_SLAVE_INFO_QUERY" from file $2
+   ocf_log debug "inside parse_slave_info_pgsql"
+   sed -ne "s/^$1|\(.*\)$/\1/p" < $2
+}
+
+# This function is @PostgreSQLErrorUnSafe 
+get_slave_info_pgsql() {
+	ocf_log debug "inside get_slave_info_pgsql"
+	local rc
+		
+	tmpfile=`mktemp ${HA_RSCTMP}/check_slave.${OCF_RESOURCE_INSTANCE}.XXXXXX`
+
+	psql_run -Q -err -O -test -x "$PGSQL_SLAVE_INFO_QUERY" > $tmpfile
+
+	if [ -s $tmpfile ]; then
+		slave_receive_lsn=`parse_slave_info_pgsql "$SLAVE_RECEIVE_LSN" $tmpfile`
+		slave_replay_lsn=`parse_slave_info_pgsql "$SLAVE_REPLAY_LSN" $tmpfile`
+		slave_wal_receiver_status=`parse_slave_info_pgsql "$SLAVE_WAL_RECEIVER_STATUS" $tmpfile`
+		slave_lag=`parse_slave_info_pgsql "$SLAVE_REPL_LAG" $tmpfile`
+		slave_is_wal_replay_paused=`parse_slave_info_pgsql "$SLAVE_WAL_REPLAY_PAUSED" $tmpfile`
+		ocf_log debug "get_slave_info_pgsql: PostgreSQL instance has a non empty slave info"
+	else
+		# Instance produced an empty "PGSQL_SLAVE_INFO_QUERY" output
+		# instance is not a slave         
+		ocf_log err "get_slave_info_pgsql: Method invoked on an instance that is not a replication slave."
+		rm -f $tmpfile
+		return $OCF_ERR_GENERIC
+	fi
+
+	rm -f $tmpfile
+	return $OCF_SUCCESS
+}
+
+# After a master node loss is detected, this function is called to check whether slave has received and applied all the WAL records
+# If slave has not received and applied all WAL records, then don't wait. 
+# If slave has finished doing these, then proceed to publish the scores and reset slave.
+# This function needs to be used, from timeout sensitive operations like monitor, promote and start.
+pgsql_unset_master_no_wait() {
+
+	ocf_log debug "inside pgsql_unset_master_no_wait"
+	local lsn_diff
+
+	is_slave_pgsql
+	rc=$?
+	if [ $rc -ne $OCF_SUCCESS ]; then
+		ocf_log warn "pgsql_unset_master_no_wait: Attempted to unset the replication master on an instance that is not configured as a replication slave"
+		return $OCF_SUCCESS
+	fi
+
+	local set_zero_score_on_drain=0
+	local force_failover="false"
+	local lsn_threshold_for_failover=0
+
+	# Check for 2 conditions.
+	# 1: Streaming is stopped 
+	# 2: Slave has replayed all wal records
+	# Let's wait for the last bits
+
+	get_slave_info_pgsql
+
+	# Is wal receiver working
+	if [ "$slave_wal_receiver_status" = "$WAL_STATE_STREAMING" ]; then
+		ocf_log info "pgsql_unset_master_no_wait: Wal receiver is running - check back later"
+		return $OCF_SUCCESS
+	fi
+
+	# Remove master dns entry, so that it won't connect to old master even if it comes back as standby
+	remove_master_dns_entry
+
+	# Get the last repl. status of the master
+	local master_status_attr=$(get_repl_status_attribute_from_cib)
+	if [ -n "$master_status_attr" ]; then
+
+		# There's a master status entry 
+		master_lsn=`echo $master_status_attr | cut -d "|" -f1`
+		ocf_log debug "pgsql_unset_master_no_wait: Master lsn = $master_lsn"
+
+		local failover_props=`get_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$CRM_ATTR_NAME_FAILOVER_PROPS"`
+		if [ -n "$failover_props" ]; then
+			force_failover=`echo $failover_props | cut -d: -f1`
+			lsn_threshold_for_failover=`echo $failover_props | cut -d: -f2`
+		fi
+
+
+		lsn_diff=`get_pg_lsn_diff "$slave_replay_lsn" "$master_lsn"`
+		# Check the slave replay_lsn is less than master lsn
+		if [ $lsn_diff -lt 0 ]; then
+			ocf_log info "Master is dead, and slave has not received all the wal records yet"
+			if [ "$((-1*$lsn_diff))" -gt "$lsn_threshold_for_failover" ]; then
+				if [ "$force_failover" = "false" ]; then
+					ocf_log info "This slave is not eligible for Promotion as it falls behind the Threshold LSN"
+					return $OCF_SUCCESS
+				fi
+			else   
+				ocf_log info "This slave is still eligible for Promotion as it is within the Threshold LSN"
+				set_zero_score_on_drain=1
+			fi
+		fi
+
+	else
+		ocf_log info "Unable to get master info from CIB, check back later"
+		#Can't do much without knowing repl status logged in CIB. exit here and revisit during
+		#next monitoring cycle.
+		exit $OCF_SUCCESS
+	fi
+
+	#check if slave has replayed all wal logs completely!
+	lsn_diff=`get_pg_lsn_diff "$slave_receive_lsn" "$slave_replay_lsn"`
+	if [ $lsn_diff -gt 0 ]; then
+		ocf_log info "pgsql_unset_master_no_wait: PostgreSQL slave has not finished replaying wal logs"
+		if [ "$force_failover" = "false" ]; then
+			ocf_log warn "force failover is false hence Not continuing further with unset master"
+			exit 0
+		elif [ "$force_failover" = ${HOSTNAME} -o "$force_failover" = "true" ]; then
+			ocf_log info  "Need to report scores even though postgres has not replied all logs"
+		else 
+			ocf_log info "PostgreSQL standby has not finished replaying wal logs - check back later"
+			return $OCF_SUCCESS
+		fi
+	fi
+
+	if [ "$force_failover" != "false" ]; then
+		
+		lsn_diff=`get_pg_lsn_diff "$slave_replay_lsn" "$master_lsn"`
+		master_score=$((1000000+lsn_diff))
+		ocf_log info "Forcing the failover with a score of $master_score"
+		set_master_score $master_score
+		
+	elif [ $set_zero_score_on_drain -eq 1 ]; then
+		
+		ocf_log info "Setting master score to 0 as slave has met threshold and drained all available LSN"
+		master_score=0
+		set_master_score $master_score
+		
+	else
+	
+		local is_sync_node=0
+		is_sync_standby
+		rc=$?
+		if [ $rc -eq $OCF_SUCCESS ]; then
+			is_sync_node=1
+		fi
+
+		ocf_log info "Falling back to normal master score calculation"  
+		calculate_and_update_score_pgsql $slave_replay_lsn $master_lsn $is_sync_node
+		
+	fi
+}
+
+calculate_and_update_score_pgsql() {	
+
+	ocf_log debug "inside calculate_and_update_score_pgsql"
+
+	# Now we need to publish a new master_score
+	local slave_lsn=$1
+	local master_lsn=$2
+	local is_sync_node=$3
+	local lsn_diff
+
+	lsn_diff=`get_pg_lsn_diff "$slave_lsn" "$master_lsn"`
+	ocf_log debug "calculate_and_update_score_pgsql: Slave and Master lsn difference = $lsn_diff"
+
+	master_score=$((1000000000+$lsn_diff))
+
+	# now, the caps, the upper cap is unlikely
+	if [ $master_score -gt 2147483647 ]; then
+	 master_score=2147483647
+	fi
+
+	# lower bound, also unlikely
+	if [ $master_score -lt -2147483647 ]; then
+	 master_score=-2147483647
+	fi
+
+	# prevent failover if master_score is less than 1000000000 which means slave is lagging behind the master
+	if [ $master_score -lt 1000000000 ]; then
+	 master_score=-2147483647
+	#Ensure master score is within the limit of INFINITY defn in Pacemaker which is 1000000
+	elif [ $master_score -ge 1000000000 ]; then
+	# +1 here is to ensure that we are always working with > 0 integers
+	master_score=$(($master_score-1000000000+1))
+	fi
+
+	# +1 for Synchronous standby
+	if [ -n "$is_sync_node" -a $is_sync_node -eq 1 ]; then 
+		master_score=$(($master_score+1))
+	fi
+	
+	ocf_log debug "calculate_and_update_score_pgsql: Master score for this node = $master_score"	  
+	set_master_score $master_score
+
+}
+
+pgsql_unset_master() {
+
+	# Instructs the PostgreSQL server to stop replicating from a master
+	# host.
+
+	# If we're currently not configured to be replicating from any
+	# host, then there's nothing to do. But we do log a warning as
+	# no-one but the CRM should be touching the PostgreSQL master/slave
+	# configuration.
+	ocf_log debug "inside pgsql_unset_master"
+	is_slave_pgsql
+	rc=$?
+	if [ $rc -ne $OCF_SUCCESS ]; then
+		ocf_log warn "pgsql_unset_master: Attempted to unset the replication master on an instance that is not configured as a replication slave"
+		return $OCF_SUCCESS
+	fi
+
+	get_slave_info_pgsql
+
+	# Is the wal receiver streaming?
+	if [ "$slave_wal_receiver_status" != "$WAL_STATE_STREAMING" ]; then
+		ocf_log err "pgsql_unset_master: Wal receiver is not streaming, master likely dead or stopped"
+	fi
+
+	# Remove master dns entry, so that it won't connect to old master even if it comes back as standby
+	remove_master_dns_entry
+
+	local lsn_diff
+
+	# At this point, the master is read only so there should not be much wal to transfer
+	# Let's wait for the last bits
+	while true; do
+
+		# If streaming, master is alive but made read only
+		# check if slave has replayed all wal logs completely!
+
+		ocf_log debug "pgsql_unset_master: Slave receive lsn = $slave_receive_lsn"
+		ocf_log debug "pgsql_unset_master: Slave replay lsn = $slave_replay_lsn"
+		
+		lsn_diff=`get_pg_lsn_diff "$slave_receive_lsn" "$slave_replay_lsn"`
+		ocf_log debug "pgsql_unset_master: Slave receive and replay lsn diff = $lsn_diff"
+		
+		if [ $lsn_diff -eq 0 ]; then
+			ocf_log info "pgsql_unset_master: PostgreSQL slave has finished replaying all wal logs"
+			break;
+		fi
+
+		if [ $lsn_diff -lt 0 ]; then
+			ocf_log info "pgsql_unset_master: PostgreSQL slave has been initialized or re-initialized with no new records to stream."
+			break;
+		fi
+
+		ocf_log info "pgsql_unset_master: Waiting for PostgreSQL to replay all wal records"
+
+		sleep 1
+
+		get_slave_info_pgsql
+
+	done
+
+	# Now we need to publish a new master_score
+	local master_status_attr=$(get_repl_status_attribute_from_cib)
+	if [ -n "$master_status_attr" ]; then 
+		# There's a master status entry although we don't know if it is
+		# a valid one
+		master_lsn=`echo $master_status_attr | cut -d "|" -f1`
+		ocf_log debug "pgsql_unset_master: Master lsn = $master_lsn"
+		
+		#Check the currernt status of the Slave
+		lsn_diff=`get_pg_lsn_diff "$slave_replay_lsn" "$master_lsn"`
+		if [ $lsn_diff -lt 0 ]; then
+			ocf_log info "Master is dead, and slave has not received all the wal records yet, Let monitor deal with score computation"
+			return $OCF_ERR_GENERIC
+		fi
+
+		local is_sync_node=0
+		is_sync_standby
+		rc=$?
+		if [ $rc -eq $OCF_SUCCESS ]; then
+			is_sync_node=1
+		fi
+
+		calculate_and_update_score_pgsql $slave_replay_lsn $master_lsn $is_sync_node
+
+	fi
+}
+
+# @PostgreSQLErrorUnSafe
+# Applicable only for Slave
+get_wal_receiver_pid() {
+
+	ocf_log debug "inside get_wal_receiver_pid"
+
+	local rc
+	local wal_receiver_pid
+
+	# First Let's try connecting to PostgreSQL and get the PID
+	# If it doesn't return then, wal receiver may not be streaming.
+	# In such case we need to get pid by issuing ps command
+	wal_receiver_pid=`psql_run -Q -err -O -test "select pid from pg_catalog.pg_stat_wal_receiver"`
+	rc=$?
+
+	if [ $rc -eq 0 -a -n "$wal_receiver_pid" ]; then 
+		ocf_log debug "get_wal_receiver_pid: Wal receiver is streaming and its pid is $wal_receiver_pid"
+		echo $wal_receiver_pid
+		return $OCF_SUCCESS
+	fi
+
+	ocf_log warn "get_wal_receiver_pid: Wal receiver is not streaming. Try to get pid from process list"
+
+	wal_receiver_pid=`ps -ef | tr -s " " | grep "[w]al receiver process" | cut -d " " -f 2`
+	
+	if [ -z "$wal_receiver_pid" ]; then 
+		ocf_log err "get_wal_receiver_pid: Failed to get wal receiver pid"
+		return $OCF_ERR_GENERIC
+	else
+		echo $wal_receiver_pid
+		return $OCF_SUCCESS
+	fi
+}
+
+# Restarts wal receiver process on Slave
+# Should be invoked only for Slave
+restart_wal_receiver_process() {
+
+	ocf_log debug "inside restart_wal_receiver_process"
+
+	local wal_receiver_pid
+	local rc
+	
+	wal_receiver_pid=`get_wal_receiver_pid`
+	rc=$?
+	
+	if [ $rc -ne $OCF_SUCCESS -o -z "$wal_receiver_pid" ]; then
+		ocf_log err "restart_wal_receiver_process: Unable to get wal receiver pid."
+		return $OCF_ERR_GENERIC
+	fi
+
+	# At present PostgreSQL doesn't provide any way to restart WAL receiver
+	# However whenever wal receiver process is not running, postmaster process will try to restart it
+	# So we will kill the wal receiver process and postmaster will take care of restarting it.
+	/bin/kill -s SIGTERM $wal_receiver_pid > /dev/null
+	rc=$?
+	if [ $rc != 0 ]; then
+	  ocf_log err "restart_wal_receiver_process: PostgreSQL wal receiver couldn't be restarted"
+	  return $OCF_ERR_GENERIC
+	fi
+
+}
+
+# @PostgreSQLErrorUnSafe
+# Given two LSN, it will return the difference in bytes
+get_pg_lsn_diff() {
+
+	ocf_log debug "inside get_pg_lsn_diff"
+
+	local lsn1="$1"
+	local lsn2="$2"
+	local lsn_diff_query
+	local lsn_diff_out
+	local rc
+	
+	lsn_diff_query="SELECT ${PGSQL_WAL_LSN_DIFF_FUNCTION_NAME}('${lsn1}', '${lsn2}')"
+	lsn_diff_out=`psql_run -Q -err -O -test "${lsn_diff_query}"`
+	rc=$?
+	
+	if [ $rc -ne 0 ]; then
+		ocf_log err "get_pg_lsn_diff: Error in getting lsn diff"
+		return $OCF_ERR_GENERIC
+	fi
+	
+	echo $lsn_diff_out
+}
+
+# @PostgreSQLErrorUnSafe
+get_synchronous_standby_names_param_value() {
+	ocf_log debug "inside get_synchronous_standby_names_param_value"
+	local sync_standby_names
+	local rc
+	
+	sync_standby_names=`psql_run -Q -err -O -test "SHOW synchronous_standby_names"`
+	rc=$?
+	
+	if [ $rc -eq 0 ]; then
+		ocf_log debug "get_synchronous_standby_names_param_value: synchronous_standby_names = $sync_standby_names"
+		echo "$sync_standby_names"
+	else
+		ocf_log err "get_synchronous_standby_names_param_value: Unable to get parameter value"
+	fi
+}
+
+can_sync_be_disabled_if_no_slaves_available() {
+	ocf_log debug "inside can_sync_be_disabled_if_no_slaves_available"
+	
+	if [ -n "$OCF_RESKEY_replicaConfig" -a "$OCF_RESKEY_replicaConfig" = "SYNC" ]; then
+		local disable_sync_if_standby_nodes_not_available=`get_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$PG_DISABLE_SYNC_IF_NO_STANDBY_CRM_ATTR_NAME" "false"`
+		if ocf_is_true $disable_sync_if_standby_nodes_not_available; then
+			ocf_log debug "can_sync_be_disabled_if_no_slaves_available: Synchronous replication deployment and disabling sync is set to true"
+			return $OCF_SUCCESS
+		else
+			ocf_log debug "can_sync_be_disabled_if_no_slaves_available: Synchronous replication deployment but disabling sync is set to false"
+		fi
+	else 
+		ocf_log debug "can_sync_be_disabled_if_no_slaves_available: Not a synchronous replication deployment"
+	fi
+	
+	return $OCF_ERR_GENERIC
+}
+
+check_and_set_sync_replication_pgsql() {
+	ocf_log debug "inside check_and_set_sync_replication_pgsql"
+	local rc
+	local sync_standby_names
+	local number_of_sync_standby_nodes
+	
+	can_sync_be_disabled_if_no_slaves_available
+	rc=$?
+
+	if [ $rc -eq $OCF_SUCCESS ]; then
+		number_of_sync_standby_nodes=`get_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$PG_NO_OF_SYNC_STANDBY_NODES_CRM_ATTR_NAME" "1"`
+		sync_standby_names=`get_synchronous_standby_names_param_value`
+		rc=$?
+		if [ $rc -eq 0 ]; then
+			if [ -z "$sync_standby_names" ]; then
+				ocf_log info "check_and_set_sync_replication_pgsql: Setting synchronous_standby_names"
+				# Delete the line
+				sed -i "/synchronous_standby_names/d" $OCF_RESKEY_config
+
+				# Set the parameter with number of sync standby
+				sed -i "\$ a synchronous_standby_names\ =\ \'$number_of_sync_standby_nodes (*)\'" $OCF_RESKEY_config
+
+				reload_pgsql
+			else
+				ocf_log debug "check_and_set_sync_replication_pgsql: synchronous_standby_names is already set"
+			fi
+		else
+			ocf_log err "check_and_set_sync_replication_pgsql: Unable to get synchronous_standby_names param value"
+		fi
+	fi
+}
+
+check_and_unset_sync_replication_pgsql() {
+
+	ocf_log debug "inside check_and_unset_sync_replication_pgsql"
+	local rc
+	local sync_standby_names
+	
+	can_sync_be_disabled_if_no_slaves_available
+	rc=$?
+	
+	if [ $rc -eq $OCF_SUCCESS ]; then
+		sync_standby_names=`get_synchronous_standby_names_param_value`
+		rc=$?
+		if [ $rc -eq 0 ]; then
+			if [ -n "$sync_standby_names" ]; then
+				ocf_log info "check_and_unset_sync_replication_pgsql: Unsetting synchronous_standby_names"
+				# Delete the line
+				sed -i "/synchronous_standby_names/d" $OCF_RESKEY_config
+
+				# Add the parameter with empty value
+				sed -i "\$ a synchronous_standby_names\ =\ \'\'" $OCF_RESKEY_config
+
+				reload_pgsql
+			else
+				ocf_log debug "check_and_unset_sync_replication_pgsql: synchronous_standby_names is already unset"
+			fi
+		else
+			ocf_log err "check_and_unset_sync_replication_pgsql: Unable to get synchronous_standby_names param value"
+		fi
+	fi
+
+}
+
+create_replication_slot() {
+	ocf_log debug "inside create_replication_slot"
+	local slotname="$1"
+	local rc
+
+	ocf_log info "create_replication_slot: Creating replication slot $slotname"
+	# TODO: Once we handle the getting only resource nodes we need to set true to restart lsn from checkpoint
+	psql_run -Q -err -repl "SELECT pg_catalog.pg_create_physical_replication_slot('${slotname}', true)"
+	rc=$?	
+	
+	if [ $rc -eq 0 ]; then
+		ocf_log info "create_replication_slot: replication slot $slotname creation success"
+		return $OCF_SUCCESS
+	else
+		ocf_log err "create_replication_slot: Failed to create replication slot $slotname"
+		return $OCF_ERR_GENERIC
+	fi
+}
+
+delete_replication_slot() {
+	ocf_log debug "inside delete_replication_slot"
+	local slotname="$1"
+	local rc
+
+	ocf_log info "delete_replication_slot: Deleting replication slot $slotname"
+	psql_run -Q -err -repl "SELECT pg_catalog.pg_drop_replication_slot('${slotname}')"
+	rc=$?	
+	
+	if [ $rc -eq 0 ]; then
+		ocf_log info "delete_replication_slot: replication slot $slotname deletion success"
+		return $OCF_SUCCESS
+	else
+		ocf_log err "delete_replication_slot: Failed to delete replication slot $slotname"
+		return $OCF_ERR_GENERIC
+	fi
+}
+
+is_replication_slot_exists() {
+	ocf_log debug "inside is_replication_slot_exists"
+	local slotname="$1"
+	local rc
+	local output
+	
+	ocf_log info "is_replication_slot_exists: Checking if replication slot $slotname exists"
+	output=`psql_run -Q -err -repl -O "SELECT slot_name,slot_type,active,restart_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name = '${slotname}'"`
+	rc=$?	
+	
+	if [ $rc -eq 0 -a -n "$output" ]; then
+		ocf_log info "is_replication_slot_exists: replication slot $slotname exists"
+		return $OCF_SUCCESS
+	else
+		ocf_log err "is_replication_slot_exists: replication slot $slotname doesn't exist"
+		return $OCF_ERR_GENERIC
+	fi
+}
+
+convert_replication_slot_name_to_adhere_conventions() {
+	ocf_log debug "inside convert_replication_slot_name_to_adhere_conventions"
+	local repl_slot="$1"
+	local slotname
+
+	ocf_log debug "convert_replication_slot_name_to_adhere_conventions: Before conversion = $repl_slot"
+	slotname=`echo "$repl_slot" | tr "[:upper:]" "[:lower:]" | sed 's/[^a-z0-9_]/_/g'`
+	ocf_log debug "convert_replication_slot_name_to_adhere_conventions: After conversion = $slotname"
+
+	echo "$slotname"
+}
+
+#######################################################################
+
+# Functions invoked by resource manager actions for PostgreSQL
+
+# @PostgreSQLErrorSafe - doesn't touch PostgreSQL
+# Return the status of postgres
+# $1 the loglevel to use (mandatory)
+# PostgreSQL equivalent of mysql_status
+pgsql_status() {
+
+	ocf_log debug "inside pgsql_status"
+	local kill_exit_code
+	local witness_start_pid
+	local rc
+	local status
+	local local_timeline
+	local master_timeline
+
+	if [ ! -e $OCF_RESKEY_pid ]; then
+		ocf_log $1 "pgsql_status: PostgreSQL is not running"
+
+		if [ -e $ASYNC_START_WITNESS_FILE ]; then
+			witness_start_pid=`cat $ASYNC_START_WITNESS_FILE | grep pid | cut -d':' -f2`
+			is_process_with_pid_exists $witness_start_pid
+			rc=$?
+
+			if [ $rc -ne $OCF_SUCCESS ]; then 
+				ocf_log $1 "pgsql_status: Process with pid $witness_start_pid in async start witness file doesn't exist. PostgreSQL might have crashed."
+				rm -f $ASYNC_START_WITNESS_FILE
+
+				# TODO: Here we need to check the timeline of this node with the master timeline
+				# In case timeline differs the node will stop immediately once it's started.
+				# we need to check for timeline diff and issue hard error to avoid reboots
+				# For now just returning not running
+				local_timeline=`get_pgsql_timeline`
+				if [ -z "$local_timeline" ]; then
+					ocf_log $1 "pgsql_status: Unable to get local timeline. Return hard error"
+					return $OCF_ERR_ARGS
+				fi
+				
+				local master_status_attr=`get_repl_status_attribute_from_cib`
+				rc=$?
+
+				## Check for timeline divergence here
+				if [ "$rc" -eq 0 ]; then
+					master_timeline=`echo $master_status_attr | cut -d "|" -f2`
+					if [ -n "$master_timeline" ]; then
+						if [ $local_timeline -ne $master_timeline ]; then 
+							ocf_log $1 "pgsql_status: Master and Standby timeline doesn't match. Return hard error"
+							return $OCF_ERR_ARGS
+						fi
+					else
+						ocf_log $1 "pgsql_status: Master timeline from status is empty"
+					fi
+				fi
+				
+				return $OCF_NOT_RUNNING;
+			fi
+
+			 # PostgreSQL is still being started - Just lie that all is OK
+			 ocf_log $1 "pgsql_status: PostgreSQL is still starting"
+			 return $OCF_SUCCESS;
+		fi
+
+		return $OCF_NOT_RUNNING;
+	else
+		status=`get_pgsql_status_from_controldata`
+		if [ -n "$status" ]; then
+			if [ "$status" = "$PGSQL_DB_STATUS_IN_CRASH_RECOVERY" -o "$status" = "$PGSQL_DB_STATUS_STARTUP" ]; then
+				# PostgreSQL is still in the process of starting.
+				# OK to return OCF_SUCCESS as it is a slave 
+				ocf_log $1 "pgsql_status: PostgreSQL still starting, current status=$status"
+				return $OCF_SUCCESS
+			elif [ "$status" = "$PGSQL_DB_STATUS_SHUTDOWNED" -o "$status" = "$PGSQL_DB_STATUS_SHUTDOWNED_IN_RECOVERY" ]; then
+				ocf_log $1 "pgsql_status: PostgreSQL not running: removing old PID file and start witness file"
+				rm -f $OCF_RESKEY_pid
+				rm -f $ASYNC_START_WITNESS_FILE
+				return $OCF_NOT_RUNNING
+			fi
+		fi
+	fi
+	
+   # PostgreSQL pid file has many information.
+   # The first line contains the PID
+   pid=`head -n 1 $OCF_RESKEY_pid`;
+   if [ -d /proc -a -d /proc/1 ]; then
+      [ "u$pid" != "u" -a -d /proc/$pid ]
+   else
+      kill -s 0 $pid >/dev/null 2>&1
+   fi
+
+   kill_exit_code=$?
+      
+   if [ $kill_exit_code -eq 0 ]; then
+   
+		pg_is_ready
+		rc=$?
+		if [ $rc -ne 0 ]; then
+			# PostgreSQL is still starting and not listening to connections. OK to return success as it is a slave.
+			ocf_log $1 "pgsql_status: PostgreSQL still starting and not accepting connections. pg_isready return code $rc"
+			return $OCF_SUCCESS
+		fi
+
+		if [ -e $ASYNC_START_WITNESS_FILE ]; then
+			witness_start_pid=`cat $ASYNC_START_WITNESS_FILE | grep pid | cut -d':' -f2`
+			if [ $witness_start_pid -eq $pid ]; then
+				# All good - server started perfect. clean up witness file and also initialize the slave properly
+				rm -f $ASYNC_START_WITNESS_FILE
+				ocf_log debug "pgsql_status: Initialize the PostgreSQL now"
+				pgsql_server_init
+				rc=$?
+				if [ $rc -ne 0 ]; then
+					ocf_log err "pgsql_status: PostgreSQL has failed to start, return hard error"
+					exit $OCF_ERR_INSTALLED
+				else          
+					ocf_log debug "pgsql_status: PostgreSQL initialized fine"
+					return $OCF_SUCCESS
+				fi
+			else
+				#something is wrong - witness file not matching with PostgreSQL pid file. 
+				#clean up witness file and return NOT_RUNNING
+				rm -f $ASYNC_START_WITNESS_FILE
+				ocf_log err "pgsql_status: PostgreSQL pid does not match with witness pid"
+				return $OCF_NOT_RUNNING
+			fi
+		fi
+		return $OCF_SUCCESS
+   else
+      ocf_log $1 "pgsql_status: PostgreSQL not running: removing old PID file and start witness file"
+      rm -f $OCF_RESKEY_pid
+      rm -f $ASYNC_START_WITNESS_FILE
+      
+      # This is abnormal, is this host the master defined in the cib?
+      # Also confirm it succeed in starting with the socket file
+      if [ "$glb_master_exists" -eq "1" -a "$glb_cib_master" =  $(get_local_ip) \
+         -a -e "$OCF_RESKEY_socket" ]; then
+         
+            ocf_log $1 "pgsql_status: PostgreSQL not running: probably crashed."
+            set_master_score 0
+            return $OCF_NOT_RUNNING
+			
+      fi
+      return $OCF_NOT_RUNNING
+   fi
+}
+
+# TODO
+# PostgreSQL equivalent of mysql_monitor
+pgsql_monitor() {
+   ocf_log debug "inside pgsql_monitor"
+   local rc
+   local status_loglevel="err"
+   local master_resource
+   local master_status_attr
+   local new_master_status_attr
+   local local_monitor_error_count=0
+
+   : ${OCF_RESKEY_CRM_meta_interval=0}
+
+   # Set loglevel to info during probe
+   if ocf_is_probe; then
+      status_loglevel="info"
+   fi
+   
+  # introducing monitor retrys: have a cluster node attribute called monitor_error_count to track number of monitor errors. 
+  # we will allow upto 3 monitor calls to fail or timeout postgresql tests so that it has lee-way in case of high load conditions.
+  # everytime monitor goes though fine and start and promote,  we reset the attribute monitor_error_count. Every postgresql test failure, 
+  # we increment the monitor_error_count 
+  local_monitor_error_count=`get_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME 0`  
+  pgsql_status $status_loglevel
+
+   rc=$?
+
+   # If status returned an error, return that immediately
+   if [ $rc -ne $OCF_SUCCESS ]; then
+		return $rc
+   fi
+   
+   if [ -e $ASYNC_START_WITNESS_FILE ]; then
+		# PostgreSQL is still in the process of starting. Allow it time and don't do any monitor checks
+		# OK to return OCF_SUCCESS as it is a slave 
+		ocf_log debug "postgreSQL still starting, skip monitor checks"
+		return $OCF_SUCCESS
+   fi
+
+   if [ $OCF_CHECK_LEVEL -gt 0 ]; then
+      # Check if this instance is configured as a slave, and if so
+      # check slave status
+
+      # Are we currently having a master?
+      if [ "$glb_master_exists" -ne "0" ]; then
+         get_pgsql_role
+         rc=$?
+         if [ "$POSTGRESQL_LAST_ERR" -ne "0" ]; then
+            ocf_log err "pgsql_monitor: Error or timeout during PostgreSQL get_pgsql_role check. Check if retry is allowed"
+            handle_error_from_monitor $local_monitor_error_count
+            rc=$?
+            return $rc       
+         fi
+         if [ $rc -eq $OCF_SUCCESS -o "$OCF_RESKEY_CRM_meta_role" = "Slave" ]; then
+            check_slave_pgsql $local_monitor_error_count
+         else
+            update_data_master_status_pgsql
+            if [ -s $master_status_file ]; then
+			   master_status_attr=`get_repl_status_attribute_from_cib`
+               new_master_status_attr="$(get_master_status_pgsql)"
+               if [ "$master_status_attr" != "$new_master_status_attr" ]; then
+                  # Doing in bg, no need to wait and that can hang if a node is lost at the same time
+                  set_crm_config_attr_val -b "$REPLICATION_CRM_ATTR_SET_NAME" "$REPLICATION_STATUS_CRM_ATTR_NAME" "$new_master_status_attr"
+               fi
+            else
+               ocf_log warn "pgsql_monitor: master status output is empty"
+               # the error will be caught & reported by test table check below
+               # as it can also deal with that max connection condition
+            fi
+            rm -f $master_status_file
+			
+			update_slave_replication_stats_pgsql
+			if [ -s $slave_repl_stats_file ]; then
+			
+				local slave_count=0
+				local found
+				local crm_nodes="$(get_crm_resource_nodes)"
+				local slave_repl_stats="$(get_slave_replication_stats_pgsql)"
+	
+				for node in $crm_nodes; do
+					found=0
+					
+					# Each line of output corresponds to single slave
+					# line format= "application_name|client_addr|state|sync_priority|sync_state"
+					for line in $slave_repl_stats; do
+						local application_name=`echo $line | cut -d "|" -f1`
+						local state=`echo $line | cut -d "|" -f3`
+						if [ "$node" = "$application_name" ]; then
+							found=1
+							# Consider as slave only if it's streaming
+							if [ -n "$state" -a "$state" = "$WAL_STATE_STREAMING" ]; then
+								slave_count=$((${slave_count}+1))
+							fi
+							slave_prev_repl_stat=`get_crm_node_attr_val $application_name $SLAVE_REPL_STAT_ATTR_NAME 'none'`
+							if [ "$slave_prev_repl_stat" != "$line" ]; then
+								set_crm_node_attr_val -b $application_name $SLAVE_REPL_STAT_ATTR_NAME $line
+							fi
+							break
+						else
+							continue
+						fi
+					done
+					
+					if [ $found -ne 1 ]; then
+						slave_prev_repl_stat=`get_crm_node_attr_val $node $SLAVE_REPL_STAT_ATTR_NAME 'none'`
+						if [ "$slave_prev_repl_stat" != 'none' ]; then
+							set_crm_node_attr_val -b $node $SLAVE_REPL_STAT_ATTR_NAME 'none'
+						fi
+					fi
+
+				done
+				
+				if [ -n "$OCF_RESKEY_replicaConfig" -a "$OCF_RESKEY_replicaConfig" = "SYNC" ]; then
+					local number_of_sync_standby_nodes=`get_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "number_of_sync_standby_nodes" "1"`
+
+					# Check the number of slaves connected to master.
+					# If slaves are greater than or equal to number of sync nodes then ensure sync is set
+					# else unset sync replication on master
+					if [ $slave_count -ge $number_of_sync_standby_nodes ]; then
+						ocf_log debug "pgsql_monitor: Trying to set synchronous replication mode if configured"
+						check_and_set_sync_replication_pgsql
+					else
+						ocf_log info "pgsql_monitor: Trying to unset synchronous replication mode if configured"
+						check_and_unset_sync_replication_pgsql
+					fi
+				fi
+			else
+				ocf_log err "pgsql_monitor: Unable to get slave replication stats"
+				
+				# Perform check and unset only stats are empty
+				if [ "$POSTGRESQL_LAST_ERR" -eq 0 ]; then
+					ocf_log info "pgsql_monitor: Trying to unset synchronous replication mode if configured"
+					check_and_unset_sync_replication_pgsql
+				fi
+			fi
+			rm -f $slave_repl_stats_file
+
+         fi
+      else
+         is_slave_pgsql
+         rc=$?
+         if [ $rc -eq $OCF_SUCCESS -o "$OCF_RESKEY_CRM_meta_role" = "Slave" ]; then
+            ocf_log warn "pgsql_monitor: **UNSETTING MASTER**"
+            pgsql_unset_master_no_wait
+          fi
+      fi
+
+      monitor_now=`date +%s`
+      monitor_timeout=$((OCF_RESKEY_CRM_meta_timeout / 1000))
+      if [ "$(($monitor_now-$monitor_start))" -gt "$((${monitor_timeout}-20))" ]; then
+       # may be too late already.. dont take a chance of timeout error if retry is possible
+       if [ $local_monitor_error_count -lt $MONITOR_FAIL_RETRY_COUNT ]; then
+            set_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME "$((${local_monitor_error_count}+1))"
+            ocf_log debug "pgsql_monitor: PostgreSQL monitor: returning success before potential timeout";
+            if [ "$OCF_RESKEY_CRM_meta_role" = "Slave" ]; then
+                return $OCF_SUCCESS
+            else
+                return $OCF_RUNNING_MASTER
+            fi
+       	fi
+      fi
+       
+      # Check for test table
+      psql_run -Q -err -test "$PGSQL_IS_IN_RECOVERY_QUERY"
+
+      if [ $POSTGRESQL_LAST_ERR -ne "$POSTGRESQL_TOO_MANY_CONN_ERR" ]; then
+         if [ $POSTGRESQL_LAST_ERR -ne 0 ]; then
+            ocf_log err "pgsql_monitor: Failed to perform select operation - check if retry is allowed";
+            handle_error_from_monitor $local_monitor_error_count
+            rc=$?
+            return $rc 
+         fi   
+      else
+         ocf_log info "pgsql_monitor: PostgreSQL server hit max_connections"        
+      fi
+      
+      # Advancing the returns inside this if loop itself as we want to avoid one more call 
+      # to PostgreSQL in get_pgsql_role - that immediately follows this if loop
+	  set_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME '0'
+      if [ "$OCF_RESKEY_CRM_meta_role" = "Slave" ]; then
+        ocf_log debug "pgsql_monitor: PostgreSQL monitor succeeded";
+        return $OCF_SUCCESS
+      else
+        ocf_log debug "pgsql_monitor: PostgreSQL monitor succeeded (master)"; 
+        return $OCF_RUNNING_MASTER
+      fi
+   fi  
+
+
+   if ocf_is_ms ; then
+	  get_pgsql_role
+	  rc=$?
+   
+	  if [ $rc -eq $OCF_RUNNING_MASTER ]; then
+		  ocf_log debug "pgsql_monitor: PostgreSQL monitor succeeded (master)";
+		  if [ "$OCF_RESKEY_CRM_meta_interval" -eq "0" ]; then
+			 # this is a probe and this server is a master so need to set master_score
+			 set_master_score 2147483647
+		  fi
+		  set_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME '0'
+		  return $OCF_RUNNING_MASTER
+      elif [ $rc -eq $OCF_SUCCESS ]; then
+		  ocf_log debug "pgsql_monitor: PostgreSQL monitor succeeded";
+		  set_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME '0'
+		  return $OCF_SUCCESS
+	  else 
+		  ocf_log err "pgsql_monitor: PostgreSQL monitor failed";
+		  return $rc
+	  fi
+   fi
+   
+}
+
+# Start PostgreSQL in the master-slave context
+# PostgreSQL equivalent of mysql_start
+pgsql_start() {
+   ocf_log debug "inside pgsql_start"
+   local current_status
+   
+   if ocf_is_ms; then
+      # set master_score to -INF at startup as we dont want the node to have any >=0 score which will set
+	  # it up for promotion
+      set_master_score -2147483647
+   fi
+
+   pgsql_status info 
+   
+   current_status=$?
+   if [ "$current_status" = "$OCF_SUCCESS" ]; then   
+     ocf_log info "PostgreSQL already running"
+     return $OCF_SUCCESS
+   fi
+   
+   pgsql_start_low
+   rc=$?
+
+   if [ $rc != $OCF_SUCCESS ]; then
+      ocf_log err "pgsql_start: Wasn't able to start PostgreSQL, stopping 'start'."
+      return $rc
+   fi
+   #return from async start
+   return $rc
+}
+
+# called once the PostgreSQL server is just started
+# PostgreSQL equivalent of mysql_server_init
+pgsql_server_init() {
+
+    ocf_log debug "inside pgsql_server_init"
+	
+	if ocf_is_ms; then
+		# We're configured as a stateful resource. At this point, 
+		# we don't know if the CRM has already promoted a master. 
+		# So, we simply start in read only mode. 
+		set_read_only_pgsql true
+
+		if ocf_is_true $OCF_RESKEY_use_replication_slots; then	
+			ocf_log info "pgsql_server_init: Delete existing replication slots"
+			local crm_nodes="$(get_crm_resource_nodes)"
+			local slotname=""
+			for node in $crm_nodes; do
+				if [ "$node" != "$HOSTNAME" ]; then
+					slotname=`convert_replication_slot_name_to_adhere_conventions "$node"`
+					is_replication_slot_exists "$slotname"
+					rc=$?
+					if [ $rc -eq $OCF_SUCCESS ]; then
+						delete_replication_slot "$slotname"
+						rc=$?
+						if [ $rc -ne $OCF_SUCCESS ]; then
+							ocf_log err "pgsql_server_init: Failed to delete replication slot $slotname"
+							return $rc
+						fi
+					fi
+				fi
+			done
+		fi
+
+		# Now, let's see whether there is a master. We might be a new
+		# node that is just joining the cluster, and the CRM may have
+		# promoted a master before.
+		if [ "$glb_master_exists" -ne 0 ]; then
+			if [ "$glb_cib_master" != $(get_local_ip) ]; then
+				## Do nothing
+				ocf_log info "pgsql_server_init: Master exists and no steps required here."
+			fi
+		else
+			# How to initialize the upcoming node when there is no master in the cluster
+			# check if this node was a previous master so that in case no upto date slaves are found, 
+			# this node has a chance to get elected again.
+			master_info=`get_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$REPLICATION_INFO_CRM_ATTR_NAME"`
+			master_IP=`echo $master_info | cut -d'|' -f1`
+			if [ "$master_IP" == $(get_local_ip) ]; then
+				ocf_log info "pgsql_server_init: This was a previous master, let us give it a score of 1 "
+				set_master_score 1
+			elif [ -n "$master_IP" ]; then
+				# this is a case where there was a previous master that was not same as current node. 
+				# in such cases do not make this server eligible for promotion by default. Let the monitor action
+				# decide on the eligibility by computing the right score.
+				ocf_log info "This was not the previous master, initialize the score to -INF "
+				set_master_score -2147483647
+			else
+				# This is a case where no master is found in the CIB database.
+				# Let's assume I'm the master and update master status if not present.
+				# In next monitor call we will have lsn comparison and right master will get elected
+				ocf_log info "There was no master in CIB, initialize the score to -INF "
+				set_master_score -2147483647
+				
+				# Get the last repl. status of the master
+				local master_status_attr=$(get_repl_status_attribute_from_cib)
+				if [ -z "$master_status_attr" ]; then
+					ocf_log info "pgsql_server_init: There is no master status, i'll assume i can be master and update my status"
+					local slave_lsn=`psql_run -Q -err -O -test "$PGSQL_GET_SLAVE_WAL_LAST_REPLAY_LSN_QUERY"`
+					local slave_timeline=`get_pgsql_timeline`
+					local new_master_status_attr="${slave_lsn}|${slave_timeline}"
+					ocf_log info "pgsql_server_init: My status: ${new_master_status_attr}"
+					set_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$REPLICATION_STATUS_CRM_ATTR_NAME" "$new_master_status_attr"
+					# Exiting here so that the score calculation happens in next monitor call
+					# This will give some time for other nodes to see the repl status
+					exit $OCF_SUCCESS
+				fi
+			fi 
+		fi
+	fi
+
+   return $OCF_SUCCESS
+}
+
+# @PostgreSQLErrorSafe - doesn't attempt to connect to PostgreSQL
+# low level PostgreSQL start
+# PostgreSQL equivalent of mysql_start_low
+pgsql_start_low() {
+   ocf_log debug "inside pgsql_start_low"
+
+   # Create recovery conf so that server is started as slave always
+   create_recovery_conf
+
+   add_or_update_master_dns_entry
+   
+   start_pg_bouncer
+
+   # Set proper permissions for PostgreSQL data directory
+   chmod 0700 $OCF_RESKEY_datadir
+   chown -R $OCF_RESKEY_user $OCF_RESKEY_datadir
+   chgrp -R $OCF_RESKEY_group $OCF_RESKEY_datadir
+   
+   # we also get the process id from $! because the PID file is only 
+   # created by mysql as soon as mysql is fully up and running
+   # for example, when recovery is busy, the pid file does not exist yet
+   # this part already creates the PID file as the mysql user
+   # so that other PRM checks know
+   # When recovery happens, the PID file does not exist yet.
+   # Same case can be with PostgreSQL hence following same.
+   
+   process_pid=`run_as_resource_owner -Q -info -O "$POSTGRES -D $OCF_RESKEY_datadir >${SG_TMP_FOLDER_FOR_DB}/prm_pg_start.log 2>&1 & echo \\$!"`
+   rc=$?
+   
+   run_as_resource_owner -Q -err "touch ${OCF_RESKEY_pid}.starting"
+   echo "$process_pid" > ${OCF_RESKEY_pid}.starting
+
+   if [ $rc != 0 ]; then
+      ocf_log err "pgsql_start_low: PostgreSQL start command failed: $rc"
+      return $rc
+   fi
+   
+   echo "pid:$process_pid" > $ASYNC_START_WITNESS_FILE
+   echo "ts:`date +%s`" >> $ASYNC_START_WITNESS_FILE
+      
+   #Don't know yet why the ts, just seems useful for debugging for now
+   ocf_log info "pgsql_start_low: PostgreSQL async started. PID = $process_pid";
+   return $OCF_SUCCESS
+
+}
+
+# @PostgreSQLErrorSafe - doesn't attempt to connect to PostgreSQL
+# PostgreSQL equivalent of mysql_stop
+pgsql_stop() {
+	ocf_log debug "inside pgsql_stop"
+
+	if [ -e $ASYNC_START_WITNESS_FILE ]; then
+	  # PostgreSQL  is still being started - we should not stop now
+	  ocf_log info "pgsql_stop: PostgreSQL is still starting - so we dont want to stop"
+	  return $OCF_SUCCESS;
+	fi
+
+	if ocf_is_ms; then
+	  # clear preference for becoming master
+	  $CRM_MASTER -D      
+	fi
+
+	# we rely only on ${OCF_RESKEY_pid}.starting
+	# as this certainly contains the file we need with the PID
+	if [ ! -f ${OCF_RESKEY_pid}.starting ]; then
+	  ocf_log info "pgsql_stop: PostgreSQL is not running - no .starting file"
+	  return $OCF_SUCCESS
+	fi
+	if [ ! -e $OCF_RESKEY_pid ]; then
+	  ocf_log info "pgsql_stop: PostgreSQL is not running - no PID file"
+	  return $OCF_SUCCESS
+	fi
+
+	pid=`cat ${OCF_RESKEY_pid}.starting 2> /dev/null`
+
+	# Check if process exists
+	if [ -d /proc -a -d /proc/1 ]; then
+	  [ "u$pid" != "u" -a -d /proc/$pid ]
+	else
+	  kill -s 0 $pid >/dev/null 2>&1
+	fi
+
+	rc=$?
+	  
+	if [ $rc -eq 0 ]; then
+		
+	   stop_pg_bouncer
+
+	   # PostgreSQL stop mode 
+	   # smart ->  SIGTERM
+	   # fast -> SIGINT
+	   # immediate -> SIGQUIT
+	   # For more details refer https://www.postgresql.org/docs/9.6/app-pg-ctl.html
+	   /bin/kill -s SIGINT $pid > /dev/null
+	   rc=$?
+	   if [ $rc != 0 ]; then
+		  ocf_log err "pgsql_stop: PostgreSQL couldn't be stopped"
+		  return $OCF_ERR_GENERIC
+	   fi
+
+	   #The below loops till PostgreSQL is stopped or stop gets timed out.
+	   stop_wait=1
+	   while [ $stop_wait = 1 ]; do
+		  kill -s 0 $pid
+		  rc=$?
+		  if [ $rc -ne 0 ]; then
+			 break
+		  fi   
+		  sleep 1
+		  ocf_log debug "pgsql_stop: PostgreSQL still hasn't stopped yet. Waiting..."
+	   done
+	fi
+   
+	rm -f ${OCF_RESKEY_pid}.starting
+	rm -f $OCF_RESKEY_pid
+	ocf_log info "pgsql_stop: PostgreSQL stopped";
+	rm -f $OCF_RESKEY_socket
+	return $OCF_SUCCESS
+}
+
+pgsql_promote() {
+
+	ocf_log debug "inside pgsql_promote"
+	local master_info
+	local rc
+	
+	if [ ! -e $OCF_RESKEY_pid -a -e $ASYNC_START_WITNESS_FILE ]; then
+	  # PostgreSQL  is still being started - we are not yet ready for promote. 
+	  # Fail the promote so that we come back again, when fully started.
+	  ocf_log warn "pgsql_promote: PostgreSQL is still starting - so we are not ready for promote"
+	  return $OCF_NOT_RUNNING;
+	fi
+
+	if ( ! pgsql_status err ); then
+	  return $OCF_NOT_RUNNING
+	fi
+
+	pg_is_ready
+	rc=$?
+	if [ $rc -ne 0 ]; then
+		# PostgreSQL is still starting and not listening to connections.
+		ocf_log err "pgsql_promote: PostgreSQL still starting and not accepting connections. pg_isready return code $rc"
+		return $OCF_NOT_RUNNING
+	fi
+
+	get_pgsql_role
+	rc=$?
+
+	if [ $rc -eq $OCF_RUNNING_MASTER ]; then
+	  ocf_log info "pgsql_promote: PostgreSQL is already master. No need to execute promote.";
+	  set_read_only_pgsql false
+	  return $OCF_SUCCESS
+	fi
+
+	# Perform PGSQL promote
+	run_as_resource_owner -Q -err -O "$PG_CTL -D $OCF_RESKEY_datadir promote"
+	
+	# Wait till it becomes master
+	while true; do
+		get_pgsql_role
+		rc=$?
+
+		if [ $rc -eq $OCF_RUNNING_MASTER ]; then
+		  ocf_log info "pgsql_promote: Instance got promoted to master.";
+		  break;
+		fi	
+		
+		sleep 1
+	done
+	
+	# Set Master Info in CIB, cluster level attribute
+	update_data_master_status_pgsql
+	if [ -s $master_status_file ]; then
+	  master_info="$(get_local_ip)|$(get_master_status_pgsql)"
+	  ocf_log info "pgsql_promote: Master info = $master_info";
+	  set_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$REPLICATION_INFO_CRM_ATTR_NAME" "$master_info"
+	else
+	  rm -f $master_status_file
+	  return $OCF_ERR_GENERIC
+	fi
+	rm -f $master_status_file
+
+	set_read_only_pgsql false || return $OCF_ERR_GENERIC
+
+	if ocf_is_true $OCF_RESKEY_use_replication_slots; then	
+		ocf_log info "pgsql_promote: Creating replication slots"
+		local crm_nodes="$(get_crm_resource_nodes)"
+		local slotname=""
+		for node in $crm_nodes; do
+			if [ "$node" != "$HOSTNAME" ]; then
+				slotname=`convert_replication_slot_name_to_adhere_conventions "$node"`
+				is_replication_slot_exists "$slotname"
+				rc=$?
+				if [ $rc -ne $OCF_SUCCESS ]; then
+					create_replication_slot "$slotname"
+					rc=$?
+					if [ $rc -ne $OCF_SUCCESS ]; then
+						ocf_log err "pgsql_promote: Unable to create replication slot $slotname"
+						return $rc
+					fi
+				fi
+			fi
+		done
+	fi
+
+	# Existing master gets a higher-than-default master preference, so
+	# the cluster manager does not shuffle the master role around
+	# unnecessarily
+	set_master_score 2147483647
+
+	sg_notify_promote_event
+	
+	# reset the monitor_error_count so that the master monitoring has a fresh start
+	set_crm_node_attr_val $HOSTNAME $MONITOR_ERROR_COUNT_ATTR_NAME '0'
+	return $OCF_SUCCESS
+}
+
+# TODO
+# @PostgreSQLErrorSafe - doesn't attempt to connect to PostgreSQL
+# PostgreSQL equivalent of mysql_demote
+pgsql_demote() {
+   ocf_log debug "inside pgsql_demote"
+   
+   if [ -e $ASYNC_START_WITNESS_FILE ]; then
+      # PostgreSQL  is still being started - there is nothing to demote. Just return success.
+      ocf_log warn "pgsql_demote: PostgreSQL is still starting - there is nothing to demote"
+      return $OCF_SUCCESS
+   fi
+
+   if ! pgsql_status err; then
+      set_master_score 0
+      exit $OCF_SUCCESS
+   else
+      # Return master preference to default, so the cluster manager gets
+      # a chance to select a new master
+      set_master_score 1
+      exit $OCF_SUCCESS
+   fi
+}
+
+# TODO
+# PostgreSQL equivalent of mysql_notify
+pgsql_notify() {
+   # If not configured as a Stateful resource, we make no sense of
+   # notifications.
+   ocf_log debug "inside pgsql_notify"
+   if ! ocf_is_ms; then
+      ocf_log info "pgsql_notify: This agent makes no use of notifications unless running in master/slave mode."
+      return $OCF_SUCCESS
+   fi
+   
+   local type_op
+   type_op="${OCF_RESKEY_CRM_meta_notify_type}-${OCF_RESKEY_CRM_meta_notify_operation}"
+   
+   ocf_log debug "pgsql_notify: Received $type_op notification."
+   
+   case "$type_op" in
+      'pre-promote')                        
+         get_slave_info_pgsql
+         if [ $? -eq "$OCF_SUCCESS" ]; then
+            # We'll be here only if the master crashed. In the event of
+            # a graceful demote, a post-demote notification event would have occurred.
+            # The post-demote include an unset-master that
+            # resets the slave after the completion of the IO and SQL
+            # threads.  The post-demote doesn't run if the master host
+            # crashed.
+            
+            # First, we unset the master and wait till wal logs are replayed
+            pgsql_unset_master
+                           
+         fi      
+      ;;
+      
+      'post-promote')
+         # The master has completed its promotion. Now is a good
+         # time to check whether our replication slave is working
+         # correctly.
+         
+         # Is the notification for our set
+         notify_resource=`echo $OCF_RESKEY_CRM_meta_notify_promote_resource|cut -d: -f1`
+         my_resource=`echo $OCF_RESOURCE_INSTANCE|cut -d: -f1`
+         if [ $notify_resource != ${my_resource} ]; then
+            ocf_log debug "pgsql_notify: Notification is not for us"
+            return $OCF_SUCCESS
+         fi
+         
+         master_host=`echo $OCF_RESKEY_CRM_meta_notify_promote_uname|tr -d " "`
+         if [ "$master_host" = ${HOSTNAME} ]; then
+            ocf_log info "pgsql_notify: This will be the new master, ignoring post-promote notification."
+         else
+            # Update master entry to reflect new master
+            add_or_update_master_dns_entry
+	
+            ocf_log info "pgsql_notify: Resetting replication"
+            ocf_log info "pgsql_notify: Changing PostgreSQL configuration to replicate from $master_host"
+            restart_wal_receiver_process
+            if [ $? -ne 0 ]; then
+               return $OCF_ERR_GENERIC
+            fi
+            
+         fi
+         return $OCF_SUCCESS
+      ;;
+      'pre-demote')
+         # Is the notification for our set
+         notify_resource=`echo $OCF_RESKEY_CRM_meta_notify_demote_resource|cut -d: -f1`
+         my_resource=`echo $OCF_RESOURCE_INSTANCE|cut -d: -f1`
+         if [ $notify_resource != ${my_resource} ]; then
+            ocf_log debug "pgsql_notify: Notification is not for us"
+            return $OCF_SUCCESS
+         fi
+         
+         demote_host=`echo $OCF_RESKEY_CRM_meta_notify_demote_uname|tr -d " "`
+         if [ $demote_host = ${HOSTNAME} ]; then
+            ocf_log info "pgsql_notify: pre-demote notification for $demote_host"
+            
+			pgsql_status err
+			# If pgsql is not running then no need to do any further ops
+			if [ $? -eq $OCF_NOT_RUNNING ]; then
+				return $OCF_SUCCESS
+			fi
+			
+            # while read_only is off, keep looping and trying to set read_only and
+            # ON and also terminating client connections
+            while ! get_read_only_pgsql 
+            do
+               # This may timeout (5s) if there are long running queries (issue #44)
+               set_read_only_pgsql true
+               
+               # Must kill all existing user connections because they are still Read/write
+               # in order for the slaves to complete recovery of wal records
+               local tmpfile
+               tmpfile=`mktemp ${HA_RSCTMP}/pg_connections.${OCF_RESOURCE_INSTANCE}.XXXXXX`
+			   
+               psql_run -Q -err -O -test "select pid from $PGSQL_GET_PG_ACTIVITY_STATS_FUNCTION" > $tmpfile
+			   
+               local pids=""
+               for pid in `cat $tmpfile`
+               do
+					if [ -n "$pid" ]; then
+						pids="${pids}${pid},"
+					fi
+               done
+			   
+			   if [ -n "$pids" ]; then
+				   #remove the trailing comma
+					pids=${pids%?}
+					psql_run -Q -err -test -usePgPort "select ${PGSQL_PG_TERMINATE_CONNECTIONS_FUNCTION_NAME}(ARRAY [${pids}])"
+			   fi
+               rm -f $tmpfile
+            done
+         else
+            ocf_log info "pgsql_notify: Ignoring pre-demote notification except for my own demotion."
+         fi
+         return $OCF_SUCCESS
+      ;;
+      'post-demote')
+         # Is the notification for our set
+         notify_resource=`echo $OCF_RESKEY_CRM_meta_notify_demote_resource|cut -d: -f1`
+         my_resource=`echo $OCF_RESOURCE_INSTANCE|cut -d: -f1`
+         if [ $notify_resource != ${my_resource} ]; then
+            ocf_log debug "pgsql_notify: Notification is not for us"
+            return $OCF_SUCCESS
+         fi
+         
+         demote_host=`echo $OCF_RESKEY_CRM_meta_notify_demote_uname|tr -d " "`
+         if [ $demote_host = ${HOSTNAME} ]; then
+            ocf_log info "pgsql_notify: Ignoring post-demote notification for my own demotion."
+            return $OCF_SUCCESS
+         fi
+         ocf_log info "pgsql_notify: post-demote notification for $demote_host."
+         # The former master has just been gracefully demoted.
+         pgsql_unset_master
+      ;;
+      *)
+         return $OCF_SUCCESS
+      ;;
+   esac
+}
+
+# TODO
+pgsql_validate() {
+
+	ocf_log debug "inside pgsql_validate"
+    local rc
+	local pg_version_file
+
+	MASTER_LSN="master_lsn"
+	SLAVE_RECEIVE_LSN="receive_lsn"
+	SLAVE_REPLAY_LSN="replay_lsn"
+	SLAVE_REPL_LAG="lag"
+	SLAVE_WAL_RECEIVER_STATUS="wal_receiver_status"
+	SLAVE_WAL_REPLAY_PAUSED="is_wal_replay_paused"
+	
+	pg_version_file="${OCF_RESKEY_datadir}/PG_VERSION"
+	
+	if [ ! -f "$pg_version_file" ]; then
+	   ocf_exit_reason "pgsql_validate: PostgreSQL version file $1 doesn't exist"
+	   return $OCF_ERR_INSTALLED
+    fi
+	
+    PG_VERSION=`cat $pg_version_file`
+	
+	sg_version_cmp "$PG_VERSION" "10.0"
+	rc=$?
+	if [ $rc -eq 1 ]||[ $rc -eq 2 ]; then
+		# If version is greater than or equal to 10
+		PGSQL_GET_MASTER_CURRENT_LSN_QUERY="select pg_catalog.pg_current_wal_lsn() as ${MASTER_LSN}"
+		PGSQL_GET_SLAVE_WAL_LAST_REPLAY_LSN_QUERY="select pg_catalog.pg_last_wal_replay_lsn() as ${SLAVE_REPLAY_LSN}"
+		PGSQL_GET_SLAVE_WAL_LAST_RECEIVE_LSN_QUERY="select pg_catalog.pg_last_wal_receive_lsn() as ${SLAVE_RECEIVE_LSN}"
+		PGSQL_SLAVE_INFO_QUERY="select pg_catalog.pg_last_wal_receive_lsn() as ${SLAVE_RECEIVE_LSN}, \
+pg_catalog.pg_last_wal_replay_lsn() as ${SLAVE_REPLAY_LSN}, (SELECT CASE WHEN \
+pg_catalog.pg_last_wal_receive_lsn() = pg_catalog.pg_last_wal_replay_lsn() THEN 0 \
+ELSE GREATEST (0, EXTRACT (EPOCH FROM now() - pg_catalog.pg_last_xact_replay_timestamp())) END) as ${SLAVE_REPL_LAG}, \
+pg_catalog.pg_is_wal_replay_paused() as ${SLAVE_WAL_REPLAY_PAUSED}, \
+COALESCE((select status from scalegrid_pg.get_pg_wal_receiver_stats()), '') as ${SLAVE_WAL_RECEIVER_STATUS}"
+		PGSQL_WAL_LSN_DIFF_FUNCTION_NAME="pg_catalog.pg_wal_lsn_diff"
+		PGSQL_RESUME_WAL_REPLAY_QUERY="select scalegrid_pg.resume_pg_wal_replay()"
+	else
+		PGSQL_GET_MASTER_CURRENT_LSN_QUERY="select pg_catalog.pg_current_xlog_location() as ${MASTER_LSN}"
+		PGSQL_GET_SLAVE_WAL_LAST_REPLAY_LSN_QUERY="select pg_catalog.pg_last_xlog_replay_location() as ${SLAVE_REPLAY_LSN}"
+		PGSQL_GET_SLAVE_WAL_LAST_RECEIVE_LSN_QUERY="select pg_catalog.pg_last_xlog_receive_location() as ${SLAVE_RECEIVE_LSN}"
+		PGSQL_SLAVE_INFO_QUERY="select pg_catalog.pg_last_xlog_receive_location() as ${SLAVE_RECEIVE_LSN}, \
+pg_catalog.pg_last_xlog_replay_location() as ${SLAVE_REPLAY_LSN}, (SELECT CASE WHEN \
+pg_catalog.pg_last_xlog_receive_location() = pg_catalog.pg_last_xlog_replay_location() THEN 0 \
+ELSE GREATEST (0, EXTRACT (EPOCH FROM now() - pg_catalog.pg_last_xact_replay_timestamp())) END) as ${SLAVE_REPL_LAG}, \
+pg_catalog.pg_is_xlog_replay_paused() as ${SLAVE_WAL_REPLAY_PAUSED}, \
+COALESCE((select status from scalegrid_pg.get_pg_wal_receiver_stats()), '') as ${SLAVE_WAL_RECEIVER_STATUS}"
+		PGSQL_WAL_LSN_DIFF_FUNCTION_NAME="pg_catalog.pg_xlog_location_diff"
+		PGSQL_RESUME_WAL_REPLAY_QUERY="select pg_catalog.pg_xlog_replay_resume()"
+	fi
+
+	PGSQL_GET_REPLICATION_STATS_QUERY="select application_name,client_addr,state,sync_priority,sync_state from scalegrid_pg.get_pg_replication_stats()"
+	PGSQL_IS_IN_RECOVERY_QUERY="select pg_catalog.pg_is_in_recovery()"
+	PGSQL_GET_PG_ACTIVITY_STATS_FUNCTION="scalegrid_pg.get_pg_activity_stats()"
+	PGSQL_PG_TERMINATE_CONNECTIONS_FUNCTION_NAME="scalegrid_pg.pg_terminate_connections"
+	
+	## Possible Cluster status
+	PGSQL_DB_STATUS_STARTUP="starting up"
+	PGSQL_DB_STATUS_SHUTDOWNED="shut down"
+	PGSQL_DB_STATUS_SHUTDOWNED_IN_RECOVERY="shut down in recovery"
+	PGSQL_DB_STATUS_SHUTDOWNING="shutting down"
+	PGSQL_DB_STATUS_IN_CRASH_RECOVERY="in crash recovery"
+	PGSQL_DB_STATUS_IN_ARCHIVE_RECOVERY="in archive recovery"
+	PGSQL_DB_STATUS_IN_PRODUCTION="in production"
+
+    return $OCF_SUCCESS
+
+}
+
+#######################################################################
+
+
+##########################################################################
+# If DEBUG_LOG is set, make this resource agent easy to debug: set up the
+# debug log and direct all output to it.  Otherwise, redirect to /dev/null.
+# The log directory must be a directory owned by root, with permissions 0700,
+# and the log must be writable and not a symlink.
+##########################################################################
+DEBUG_LOG="/tmp/${OCF_RESKEY_db_type}.ocf.ra.debug/log"
+monitor_start=0
+if [ "${DEBUG_LOG}" -a -w "${DEBUG_LOG}" -a ! -L "${DEBUG_LOG}" ]; then
+   DEBUG_LOG_DIR="${DEBUG_LOG%/*}"
+   if [ -d "${DEBUG_LOG_DIR}" ]; then
+      exec 9>>"$DEBUG_LOG"
+      exec 2>&9
+      date >&9
+      if [ "$OCF_RESKEY_CRM_meta_notify" == "true" ]; then
+        echo "$OCF_RESKEY_CRM_meta_notify_key_type - $OCF_RESKEY_CRM_meta_notify_key_operation" >&9
+      fi
+      echo "$*" >&9
+      env | grep OCF_ | sort >&9
+      set -x
+   else
+      exec 9>/dev/null
+   fi
+fi
+
+case "$1" in
+   meta-data)    meta_data
+   exit $OCF_SUCCESS;;
+   usage|help)   usage
+   exit $OCF_SUCCESS;;
+esac
+
+if [ "$#" -lt "1" ]; then
+   usage
+   exit $OCF_SUCCESS
+fi
+
+# Create a sg tmp folder for db if it doesn't exists
+if [ ! -d "$SG_TMP_FOLDER_FOR_DB" ]; then 
+	mkdir -p "$SG_TMP_FOLDER_FOR_DB"
+	chown $OCF_RESKEY_user $SG_TMP_FOLDER_FOR_DB
+	chgrp $OCF_RESKEY_group $SG_TMP_FOLDER_FOR_DB
+fi
+
+
+
+# Validation checks are required for PostgreSQL
+if [ "$OCF_RESKEY_db_type" = "$SG_POSTGRESQL_DB" ]; then
+	pgsql_validate
+	rc=$?
+	LSB_STATUS_STOPPED=3
+	if [ $rc -ne 0 ]; then
+	   case "$1" in
+	      stop) exit $OCF_SUCCESS;;
+	      monitor) exit $OCF_NOT_RUNNING;;
+	      status) exit $LSB_STATUS_STOPPED;;
+	      *) exit $rc;;
+	   esac
+	fi
+fi
+
+if [ "$1" = "monitor" ]; then
+	monitor_start=`date +%s`
+fi
+
+#Global info missing from OCF_RESKEY
+resources=`$CRM_RES --list`
+
+# now we need the master-slave clone set name, need to walk around limitations
+# of older pacemaker
+if [[ "$OCF_RESKEY_crm_feature_set" > "3.0.1" ]]; then
+   glb_master_resource=`echo "$resources" | egrep "\[$INSTANCE_ATTR_NAME\]" | awk '{print $3}' | head -n 1`
+else
+   # older versions of Pacemaker don't write the primitive name in the resources list
+   for msr in `echo "$resources" | grep 'Master/Slave' | awk '{print $3}'`; do
+      isThere=`$CRM_RES -q -r $msr | grep primitive | grep -c $INSTANCE_ATTR_NAME`
+      if [ "$isThere" -gt "0" ]; then
+         glb_master_resource=$msr
+      fi
+   done
+fi
+
+
+glb_master_exists=`echo "$resources" | grep -A2 " $glb_master_resource " | egrep -c 'Master[^\/]'`
+
+if [ "$glb_master_exists" -eq "1" ]; then
+  glb_local_info=`get_crm_config_attr_val "$REPLICATION_CRM_ATTR_SET_NAME" "$REPLICATION_INFO_CRM_ATTR_NAME"`
+  glb_cib_master=`echo $glb_local_info | cut -d'|' -f1`
+fi
+
+
+# What kind of method was invoked?
+case "$1" in
+   start)    pgsql_start;;
+   stop)     pgsql_stop;;
+   status)   pgsql_status err;;
+   monitor)  pgsql_monitor;;
+   promote)  pgsql_promote;;
+   demote)   pgsql_demote;;
+   notify)   pgsql_notify;;
+   validate-all) exit $OCF_SUCCESS;;
+   
+   *)     usage
+   exit $OCF_ERR_UNIMPLEMENTED;;
+esac
